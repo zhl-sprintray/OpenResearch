@@ -225,6 +225,7 @@ fn classify(method: &Method, route: &str) -> Option<TunnelRoute> {
             | "/api/user-skills"
             | "/api/latex-templates"
             | "/api/internal/permissions"
+            | "/api/tunnel/access"
             // Pairing codes and the device list are managed from this computer.
             | "/api/tunnel/pairing-codes"
             | "/api/tunnel/devices"

@@ -644,7 +644,7 @@ mod imp {
                 no_agent: false,
                 model: None,
                 remote_host: false,
-                tunnel_origin: None,
+                tunnel_access: None,
                 desktop_app: true,
             };
             // The window is useless without its server, so the app goes with it.
