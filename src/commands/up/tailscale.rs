@@ -83,6 +83,11 @@ impl TunnelProvider for TailscaleServe {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // macOS installs `tailscale` as a shell wrapper that runs the app's CLI
+        // without `exec`, so the process serving 443 is a grandchild. Giving
+        // the child its own process group lets `stop` and `Drop` reach both.
+        #[cfg(unix)]
+        command.process_group(0);
         hide_console(&mut command);
         let mut child = command
             .spawn()
@@ -137,17 +142,36 @@ impl ProviderChild for ServeChild {
         // also drops it if we have to kill the child.
         #[cfg(unix)]
         if let Some(pid) = self.child.id() {
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
+            signal_group(pid, libc::SIGTERM);
             if tokio::time::timeout(Duration::from_secs(3), self.child.wait())
                 .await
                 .is_ok()
             {
                 return;
             }
+            signal_group(pid, libc::SIGKILL);
         }
         let _ = self.child.kill().await;
+    }
+}
+
+impl Drop for ServeChild {
+    fn drop(&mut self) {
+        // `kill_on_drop` reaches only the wrapper; take its whole group down.
+        // `id()` is None once the child has been reaped, so a reused pid is
+        // never signalled.
+        #[cfg(unix)]
+        if let Some(pid) = self.child.id() {
+            signal_group(pid, libc::SIGTERM);
+        }
+    }
+}
+
+/// Signals every process in the group led by `pid` (see `process_group(0)`).
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: libc::c_int) {
+    unsafe {
+        libc::killpg(pid as libc::pid_t, signal);
     }
 }
 
@@ -391,5 +415,49 @@ mod tests {
         assert_eq!(check_version("1.52.0\n"), None);
         assert_eq!(check_version("1.76.1-t1234\n  go version: go1.23\n"), None);
         assert_eq!(check_version("unknown"), None);
+    }
+
+    // The macOS `tailscale` is a wrapper script that runs the real CLI without
+    // `exec`; stopping must end that grandchild too, or it keeps serving 443.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_ends_a_grandchild_behind_a_wrapper_script() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "orx-serve-grandchild-{}-{}.pid",
+            std::process::id(),
+            crate::store::now_ms()
+        ));
+        let script = format!("sleep 60 & echo $! > {}; wait", pid_file.display());
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(script).kill_on_drop(true);
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let mut grandchild = None;
+        for _ in 0..50 {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
+            {
+                grandchild = Some(pid);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let grandchild = grandchild.expect("wrapper started its grandchild");
+        let serve = Box::new(ServeChild {
+            child,
+            output: Arc::new(Mutex::new(Vec::new())),
+        });
+        serve.stop().await;
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = unsafe { libc::kill(grandchild, 0) } == 0;
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(!alive, "grandchild {grandchild} outlived stop()");
     }
 }
