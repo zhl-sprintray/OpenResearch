@@ -2974,15 +2974,30 @@ impl Store {
     /// `parts_json` of a session's assistant messages that may hold an
     /// unanswered prompt card, oldest first. A text prefilter: callers parse
     /// the parts to confirm.
-    pub fn chat_parts_with_open_prompts(&self, session_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare_cached(
-            r#"SELECT parts_json FROM chat_messages
-             WHERE session_id = ?1 AND role = 'assistant'
-               AND parts_json LIKE '%"resolved":false%'
-             ORDER BY created_at ASC, rowid ASC"#,
-        )?;
-        let rows = stmt.query_map(params![session_id], |row| row.get(0))?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    /// `(session_id, parts_json)` of the assistant messages in `session_ids`
+    /// that may hold an unanswered prompt card, oldest first within each
+    /// session. One query per few hundred sessions, not one per session.
+    pub fn chat_parts_with_open_prompts(
+        &self,
+        session_ids: &[&str],
+    ) -> Result<Vec<(String, String)>> {
+        let mut rows = Vec::new();
+        for chunk in session_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let mut stmt = self.conn.prepare(&format!(
+                r#"SELECT session_id, parts_json FROM chat_messages
+                 WHERE session_id IN ({placeholders}) AND role = 'assistant'
+                   AND parts_json LIKE '%"resolved":false%'
+                 ORDER BY session_id, created_at ASC, rowid ASC"#
+            ))?;
+            let found = stmt.query_map(rusqlite::params_from_iter(chunk), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            for row in found {
+                rows.push(row?);
+            }
+        }
+        Ok(rows)
     }
 
     pub fn has_chat_messages(&self, session_id: &str) -> Result<bool> {

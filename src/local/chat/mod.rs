@@ -6741,15 +6741,14 @@ pub fn pending_prompt_ids<'a>(
     store: &Store,
     session_ids: impl IntoIterator<Item = &'a String>,
 ) -> Result<HashMap<String, Vec<String>>> {
-    let mut pending = HashMap::new();
-    for session_id in session_ids {
+    let session_ids: Vec<&str> = session_ids.into_iter().map(String::as_str).collect();
+    let mut pending: HashMap<String, Vec<String>> = HashMap::new();
+    for (session_id, parts_json) in store.chat_parts_with_open_prompts(&session_ids)? {
+        let parts: Vec<WirePart> = serde_json::from_str(&parts_json).unwrap_or_default();
         let mut ids = Vec::new();
-        for parts_json in store.chat_parts_with_open_prompts(session_id)? {
-            let parts: Vec<WirePart> = serde_json::from_str(&parts_json).unwrap_or_default();
-            collect_unresolved_prompt_ids(&parts, &mut ids);
-        }
+        collect_unresolved_prompt_ids(&parts, &mut ids);
         if !ids.is_empty() {
-            pending.insert(session_id.clone(), ids);
+            pending.entry(session_id).or_default().extend(ids);
         }
     }
     Ok(pending)
