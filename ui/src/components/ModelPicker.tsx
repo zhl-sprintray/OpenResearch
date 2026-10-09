@@ -68,6 +68,46 @@ export function defaultSelection(harnesses: Harness[]): ModelSelection | null {
   };
 }
 
+/** The composer pill's label: the catalog's own name for the selected model
+ * (the Claude aliases like `opus[1m]` are meaningless prettified). */
+export function selectionLabel(harnesses: Harness[], value: ModelSelection | null): string {
+  if (!value) return m.model_picker_model();
+  if (!value.model) return m.model_picker_default_model();
+  const selected = harnesses.find((h) => h.id === value.harness)?.models.find((entry) => entry.id === value.model);
+  return selected ? harnessModelLabel(selected) : `${modelLabel(value.model)} · ${m.model_picker_unverified()}`;
+}
+
+/** A harness's models matching `query` (lowercase). Without a query, large
+ * catalogs stay behind the filter box; `hidden` counts the rest. */
+export function modelGroup(harness: Harness, query: string) {
+  let models = harness.models;
+  if (query) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(query));
+  else if (harness.id === "opencode" || harness.id === "cursor" || harness.id === "antigravity") models = models.slice(0, 5);
+  return { harness, models, hidden: query ? 0 : harness.models.length - models.length };
+}
+
+/** The selection after picking `model` on `harness`. Switching harness
+ * reseeds mode defaults for that harness.
+ *
+ * Reasoning is reconciled against the *newly selected model* in both cases:
+ * choices are per-model now, so an effort the previous model allowed may not
+ * exist on this one (`ultra` on Sol → 5.5). Keeping it would send a value the
+ * model rejects, so it falls back to that model's default. */
+export function pickedSelection(harness: Harness, model: string | null, value: ModelSelection | null): ModelSelection {
+  const sameHarness = value?.harness === harness.id;
+  return {
+    harness: harness.id,
+    model,
+    serviceTier: reconcileServiceTier(harness, model, sameHarness ? value?.serviceTier : null),
+    permissionMode: sameHarness ? value!.permissionMode : harness.options?.defaultPermissionMode ?? null,
+    reasoningLevel: reconcileReasoning(
+      harness,
+      model,
+      sameHarness && harness.models.some((entry) => entry.id === model) ? value!.reasoningLevel : null,
+    ),
+  };
+}
+
 /** Close-on-outside-click + open state shared by the composer dropdowns (and
  * the session-rail menus). */
 export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
@@ -175,60 +215,15 @@ export function ModelPicker({
     // Locked to the open session's harness: only offer that one.
     const shown =
       lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
-    return shown.map((h) => {
-      let models = h.models;
-      if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
-      // Large catalogs stay behind the filter box.
-      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity") models = models.slice(0, 5);
-      return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
-    });
+    return shown.map((h) => modelGroup(h, q));
   }, [harnesses, filter, lockHarness, value]);
 
-  /** Switch harness → reseed mode defaults for that harness.
-   *
-   * Reasoning is reconciled against the *newly selected model* in both cases:
-   * choices are per-model now, so an effort the previous model allowed may not
-   * exist on this one (`ultra` on Sol → 5.5). Keeping it would send a value the
-   * model rejects, so it falls back to that model's default. */
   const pick = (harness: Harness, model: string | null) => {
-    const sameHarness = value?.harness === harness.id;
-    onSelect({
-      harness: harness.id,
-      model,
-      serviceTier: reconcileServiceTier(
-        harness,
-        model,
-        sameHarness ? value?.serviceTier : null,
-      ),
-      permissionMode: sameHarness
-        ? value!.permissionMode
-        : harness.options?.defaultPermissionMode ?? null,
-      reasoningLevel: reconcileReasoning(
-        harness,
-        model,
-        sameHarness && harness.models.some((entry) => entry.id === model)
-          ? value!.reasoningLevel
-          : null,
-      ),
-    });
+    onSelect(pickedSelection(harness, model, value));
     close();
   };
 
-  // Pill label: prefer the catalog's own name for the selected model (the
-  // Claude aliases like `opus[1m]` are meaningless prettified).
-  const selected =
-    value?.model != null
-      ? harnesses
-        .find((h) => h.id === value.harness)
-        ?.models.find((m) => m.id === value.model)
-      : undefined;
-  const label = value
-    ? value.model
-      ? selected
-        ? harnessModelLabel(selected)
-        : `${modelLabel(value.model)} · ${m.model_picker_unverified()}`
-      : m.model_picker_default_model()
-    : m.model_picker_model();
+  const label = selectionLabel(harnesses, value);
   const effectiveReasoningId = value?.reasoningLevel ?? defaultReasoningId ?? reasoningChoices[0]?.id;
   const reasoningLabel = reasoningChoices.find((choice) => choice.id === effectiveReasoningId)?.label;
   const effectivePermissionId = value?.permissionMode ?? defaultPermissionId ?? permissionChoices[0]?.id;

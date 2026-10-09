@@ -9,12 +9,14 @@ import { StatusBadge } from "./components/StatusBadge";
 import { Button, IconButton, Spinner } from "./components/ui";
 import { cn } from "./components/ui/cn";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
+import { MobileNewSession } from "./MobileNewSession";
 import { initialMobileNav, mobileNavReducer, panelToPane, pendingPrompts, type MobilePaneView, type MobilePanel } from "./mobileNav";
 import { m } from "./paraglide/messages.js";
 import { queryClient, setScopedQueryData } from "./queries/client";
 import { getChatMessagesQuery, listChatSessionsQuery } from "./queries/chat";
 import { getUiStateQuery, listProjectActivityQuery, listProjectsQuery } from "./queries/projects";
 import { readSidebarIds, sidebarProjectSessions, sortSidebarProjects, toggleId, writeSidebarIds } from "./sidebarLayout";
+import { useVisualViewportStyle } from "./useVisualViewport";
 import { taskLocation, type Pane } from "./workspaceState";
 
 /** Sessions per drawer group before "Show more", as in the desktop rail. */
@@ -34,6 +36,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
 }) {
   const router = useRouter();
   const [nav, dispatch] = useReducer(mobileNavReducer, initialMobileNav);
+  const viewportStyle = useVisualViewportStyle();
   const { status: updateStatus } = useUpdateStatus(runtime.kind === "local");
   const projectsQuery = useQuery(listProjectsQuery());
   const { data: activity = [] } = useQuery(listProjectActivityQuery());
@@ -58,6 +61,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
     dispatch({ type: "selectSession" });
     go(taskLocation(options?.projectId ?? projectId, target), options?.replace);
   }, [go, projectId]);
+  const openNewSession = () => dispatch({ type: "openNewSession", sessionProjectId: sessionId ? projectId : null, routeProjectId: projectId });
   const openPanel = (panel: MobilePanel) => {
     dispatch({ type: "pushPanel", panel });
     go(taskLocation(projectId, sessionId, panelToPane(panel, sessionId ?? "")));
@@ -80,7 +84,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
     : sessionId && currentSessions && !session ? m.model_picker_unavailable() : null;
 
   return (
-    <div className="mobile-shell relative flex h-full w-full flex-col overflow-hidden bg-background text-text">
+    <div className="mobile-shell relative flex h-full w-full flex-col overflow-hidden bg-background text-text" style={viewportStyle}>
       {runtime.kind === "local" && <OfflineBanner compact />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} compact />}
       <header className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-2">
@@ -94,7 +98,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
           <div className="truncate text-sm font-medium">{session?.title?.trim() || m.chat_new_session()}</div>
           <div className="truncate text-xs text-subtext">{project?.name ?? ""}</div>
         </div>
-        <IconButton aria-label={m.chat_panel_new_chat()} onClick={() => openSession(null)}><Plus size={18} /></IconButton>
+        <IconButton aria-label={m.chat_panel_new_chat()} onClick={openNewSession}><Plus size={18} /></IconButton>
         <IconButton aria-label={m.app_experiments()} onClick={() => openPanel({ kind: "experiments" })}><FlaskConical size={18} /></IconButton>
         <IconButton aria-label={m.app_artifacts()} onClick={() => openPanel({ kind: "artifacts" })}><Package size={18} /></IconButton>
       </header>
@@ -144,6 +148,20 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
           </section>
         )}
       </main>
+      {nav.newSession?.open && uiState && (
+        <MobileNewSession
+          projects={sortedProjects}
+          projectId={nav.newSession.projectId}
+          onProject={(id) => dispatch({ type: "pickNewSessionProject", projectId: id })}
+          onClose={() => dispatch({ type: "closeNewSession" })}
+          onCreated={(id, target) => openSession(id, { projectId: target })}
+          runtime={runtime}
+          preferredAgent={uiState.preferredAgent}
+          onPreferredAgentChange={persistPreferredAgent}
+          preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
+          onPreferredAutonomyChange={persistPreferredAutonomy}
+        />
+      )}
       {nav.drawerOpen && (
         <div className="absolute inset-0 z-40 flex">
           <SessionDrawer
@@ -151,7 +169,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
             sessionsFor={(id) => sessionsByProject.get(id)?.data}
             activeId={sessionId}
             pending={pending.bySession}
-            onNew={() => openSession(null)}
+            onNew={openNewSession}
             onOpen={(target) => openSession(target.id, { projectId: target.projectId })}
           />
           <button type="button" aria-label={m.mobile_close_menu()} className="min-w-0 flex-1 bg-modal-backdrop" onClick={() => dispatch({ type: "closeDrawer" })} />
