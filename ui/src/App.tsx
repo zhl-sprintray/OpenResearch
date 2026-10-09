@@ -2347,7 +2347,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       {demoWelcomeOpen && activeProject && isDemoProjectId(activeProject.id) && (
         <DemoWelcomeModal
           onClose={closeDemoWelcome}
-          onCreateProject={createProjectFromDemoWelcome}
+          onCreateProject={caps.projectCreate ? createProjectFromDemoWelcome : undefined}
         />
       )}
     </div>
