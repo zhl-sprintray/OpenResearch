@@ -405,30 +405,37 @@ pub(super) fn limit_new_session(
     }
 }
 
-/// The mode an answered prompt resumes under. Approving a plan necessarily
-/// leaves Plan, so an explicit choice may go up to the looser of the session's
-/// current mode and the local default — never past what a session created
-/// over Tunnel access could start with.
+/// The mode an answered prompt resumes under, capped at the looser of the
+/// session's current mode and the local default — never past what a session
+/// created over Tunnel access could start with. Approving a plan necessarily
+/// leaves Plan, so the cap is not just the current mode. With no explicit
+/// choice the cap itself is returned, so the harness never falls back to its
+/// own default (Claude Code resumes a permission approval under
+/// bypassPermissions).
 pub(super) fn limit_resume_mode(
     state: &AppState,
     session_id: &str,
     resume_mode: Option<&str>,
-) -> std::result::Result<(), ApiError> {
-    let Some(requested) = resume_mode.filter(|mode| !mode.trim().is_empty()) else {
-        return Ok(());
-    };
+) -> std::result::Result<Option<String>, ApiError> {
     let session = chat_session(state, session_id)?;
-    let ceilings = [
-        current_mode(&session),
-        local_default_mode(state, &session.harness)?,
-    ];
-    if ceilings
-        .iter()
-        .any(|ceiling| within(&session.harness, requested, ceiling.as_deref()))
-    {
-        Ok(())
-    } else {
-        Err(looser_refused())
+    let current = current_mode(&session);
+    let local_default = local_default_mode(state, &session.harness)?;
+    let cap = match (current, local_default) {
+        (Some(current), Some(local_default)) => {
+            if within(&session.harness, &current, Some(&local_default)) {
+                Some(local_default)
+            } else {
+                Some(current)
+            }
+        }
+        (current, local_default) => current.or(local_default),
+    };
+    match resume_mode.filter(|mode| !mode.trim().is_empty()) {
+        Some(requested) if within(&session.harness, requested, cap.as_deref()) => {
+            Ok(Some(requested.to_string()))
+        }
+        Some(_) => Err(looser_refused()),
+        None => Ok(cap),
     }
 }
 
@@ -1057,6 +1064,46 @@ mod tests {
             } else {
                 assert_eq!(status, 403, "{mode:?}");
             }
+        }
+    }
+
+    /// Answering a prompt runs the agent, so this checks the resume mode the
+    /// respond handler hands on over Tunnel access, fed through Claude Code's
+    /// real resume rules: a permission approval with no `resumeMode` (which
+    /// locally resumes under bypassPermissions) stays within the cap.
+    #[tokio::test]
+    async fn approving_a_claude_permission_without_a_resume_mode_stays_within_the_cap() {
+        let paired = Paired::open().await;
+        paired
+            .state
+            .tunnel_devices
+            .store()
+            .unwrap()
+            .set_preferred_agent(&crate::store::StoredAgentSelection {
+                harness: "claude-code".into(),
+                model: None,
+                service_tier: None,
+                permission_mode: Some("acceptEdits".into()),
+                reasoning_level: None,
+            })
+            .unwrap();
+        let session = paired.seed_session("claude-code", Some("manual"), false);
+        let Ok(resume_mode) = limit_resume_mode(&paired.state, &session, None) else {
+            panic!("the session exists");
+        };
+        assert_eq!(resume_mode.as_deref(), Some("acceptEdits"));
+        let answer = crate::local::chat::PromptAnswer {
+            session_id: session,
+            prompt_id: "p".into(),
+            approve: true,
+            resume_mode,
+            answers: Vec::new(),
+            note: None,
+            annotations: Vec::new(),
+        };
+        for kind in ["permission", "plan"] {
+            let (_, mode) = crate::local::harness::claude::synthesize_resume(kind, &answer);
+            assert_eq!(mode, Some(PermissionMode::AcceptEdits), "{kind}");
         }
     }
 

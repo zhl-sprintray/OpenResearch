@@ -7918,10 +7918,10 @@ async fn respond_chat(
     State(state): State<AppState>,
     tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
     Path(id): Path<String>,
-    Json(req): Json<RespondReq>,
+    Json(mut req): Json<RespondReq>,
 ) -> ApiResult {
     if tunnel_access.is_some() {
-        tunnel::limit_resume_mode(&state, &id, req.resume_mode.as_deref())?;
+        req.resume_mode = tunnel::limit_resume_mode(&state, &id, req.resume_mode.as_deref())?;
     }
     reject_if_stopping(&state)?;
     state
