@@ -53,6 +53,7 @@ mod devices;
 mod harness_setup;
 mod tailscale;
 mod tunnel;
+pub(crate) use tunnel::reject_tunnel_proxy_headers;
 mod tunnel_access;
 use compute_settings::*;
 

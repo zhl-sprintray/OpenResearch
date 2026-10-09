@@ -546,9 +546,10 @@ const TUNNEL_PROXY_HEADERS: &[&str] = &[
     "tailscale-user-name",
 ];
 
-/// Original-port guard: a tunnel aimed at the wrong listener fails loudly
-/// instead of handing a public URL full, unauthenticated local access.
-pub(super) async fn reject_tunnel_proxy_headers(request: Request, next: Next) -> Response {
+/// Original-port (and Remote gateway) guard: a tunnel aimed at the wrong
+/// listener fails loudly instead of handing a public URL full,
+/// unauthenticated local access.
+pub(crate) async fn reject_tunnel_proxy_headers(request: Request, next: Next) -> Response {
     let forwarded = TUNNEL_PROXY_HEADERS
         .iter()
         .find(|name| request.headers().contains_key(**name));
