@@ -51,6 +51,7 @@ use crate::{browser, UpArgs};
 pub(crate) mod compute_settings;
 mod harness_setup;
 mod tunnel;
+mod tunnel_access;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
