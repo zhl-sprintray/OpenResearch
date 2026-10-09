@@ -6,11 +6,13 @@ export function Tooltip({
   children,
   className,
   interactive = false,
+  side = "top",
 }: {
   content: string;
   children: ReactNode;
   className?: string;
   interactive?: boolean;
+  side?: "top" | "bottom";
 }) {
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
@@ -24,7 +26,9 @@ export function Tooltip({
     const bounds = tooltip.getBoundingClientRect();
     const left = Math.max(8, Math.min(anchor.left + anchor.width / 2 - bounds.width / 2, window.innerWidth - bounds.width - 8));
     tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${Math.max(8, anchor.top - bounds.height - 6)}px`;
+    tooltip.style.top = side === "bottom"
+      ? `${Math.min(anchor.bottom + 6, window.innerHeight - bounds.height - 8)}px`
+      : `${Math.max(8, anchor.top - bounds.height - 6)}px`;
   }
 
   function hide() {
