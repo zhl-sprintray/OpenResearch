@@ -6716,6 +6716,37 @@ fn first_unresolved_permission_id(session_id: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+fn collect_unresolved_prompt_ids(parts: &[WirePart], out: &mut Vec<String>) {
+    for part in parts {
+        if part.prompt.as_ref().is_some_and(|prompt| !prompt.resolved) {
+            out.push(part.id.clone());
+        }
+        collect_unresolved_prompt_ids(&part.children, out);
+    }
+}
+
+/// Unanswered prompt cards (permission, plan, question — sub-agent
+/// transcripts included) per session, in transcript order. Sessions with none
+/// are left out. Feeds the session summary's `pendingPromptIds`, which the UI
+/// keeps live from `chat.message` events.
+pub fn pending_prompt_ids<'a>(
+    store: &Store,
+    session_ids: impl IntoIterator<Item = &'a String>,
+) -> Result<HashMap<String, Vec<String>>> {
+    let mut pending = HashMap::new();
+    for session_id in session_ids {
+        let mut ids = Vec::new();
+        for parts_json in store.chat_parts_with_open_prompts(session_id)? {
+            let parts: Vec<WirePart> = serde_json::from_str(&parts_json).unwrap_or_default();
+            collect_unresolved_prompt_ids(&parts, &mut ids);
+        }
+        if !ids.is_empty() {
+            pending.insert(session_id.clone(), ids);
+        }
+    }
+    Ok(pending)
+}
+
 /// Flip a prompt to resolved and stamp the answer echo (see
 /// [`WirePrompt::answers`]) so the collapsed card can show the outcome.
 /// `None` (stale-card cleanup, cancelled bridge requests) leaves any earlier
@@ -10565,6 +10596,57 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             "a leased helper must stay Running"
         );
         assert!(!host.is_busy("parent").await);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_prompt_ids_list_each_sessions_unanswered_cards() {
+        let (store, dir) = temp_store("pending-prompts");
+        session(&store, "child");
+        session(&store, "answered");
+        let card = |id: &str, kind: &str, resolved| {
+            WirePart::prompt(
+                id,
+                WirePrompt {
+                    kind: kind.into(),
+                    resolved,
+                    ..Default::default()
+                },
+            )
+        };
+        let mut nested = WirePart::text("tool", "");
+        nested.children = vec![card("q1", "question", false)];
+        let message = |id: &str, session_id: &str, parts: Vec<WirePart>| StoredChatMessage {
+            session_id: session_id.into(),
+            parts_json: serde_json::to_string(&parts).unwrap(),
+            ..assistant_message(id, None, "")
+        };
+        for msg in [
+            message(
+                "m1",
+                "child",
+                vec![card("p1", "permission", false), card("plan1", "plan", true)],
+            ),
+            message("m2", "child", vec![nested, card("plan2", "plan", false)]),
+            message("m3", "answered", vec![card("p2", "permission", true)]),
+        ] {
+            store.upsert_chat_message(&msg).unwrap();
+        }
+
+        let pending = pending_prompt_ids(
+            &store,
+            ["child", "answered", "missing"].map(String::from).iter(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            pending,
+            HashMap::from([(
+                "child".to_string(),
+                vec!["p1".to_string(), "q1".into(), "plan2".into()]
+            )])
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

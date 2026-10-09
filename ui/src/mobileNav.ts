@@ -2,7 +2,7 @@
  * page and the stack of full-screen panels. The current session is not here;
  * it stays in the route. Pure logic, no React. */
 
-import type { ChatMessage } from "./api";
+import type { ChatMessage, ChatPart, ChatSession } from "./api";
 import type { Pane } from "./workspaceState";
 
 export type MobilePanel =
@@ -97,22 +97,38 @@ export function mobilePaneView(pane: Pane | undefined): MobilePaneView {
 }
 
 export interface PendingPrompts {
-  /** Badge count on the menu button, across every listed session. */
+  /** Badge count on the menu button: sessions awaiting an answer, across
+   * every listed project. */
   total: number;
-  /** Sessions with at least one unresolved prompt; drawer rows mark these. */
+  /** Unresolved prompts per awaiting session; drawer rows mark these. */
   bySession: Record<string, number>;
 }
 
-/** Count unresolved prompts (permission, plan, question) in the listed
- * sessions, from whichever transcripts are loaded. Sessions without loaded
- * messages count as zero. */
-export function pendingPrompts(sessions: readonly { id: string }[], messages: Readonly<Record<string, readonly ChatMessage[] | undefined>>): PendingPrompts {
+/** Derive the badge and drawer marks from the session summaries' server-
+ * computed `pendingPromptIds` (kept live by `applyPromptMessage`). */
+export function pendingPrompts(sessions: readonly Pick<ChatSession, "id" | "pendingPromptIds">[]): PendingPrompts {
   const bySession: Record<string, number> = {};
-  let total = 0;
-  for (const { id } of sessions) {
-    const count = (Object.hasOwn(messages, id) ? messages[id] ?? [] : [])
-      .reduce((sum, message) => sum + message.parts.filter((part) => part.prompt && !part.prompt.resolved).length, 0);
-    if (count) { bySession[id] = count; total += count; }
+  for (const { id, pendingPromptIds } of sessions) {
+    if (pendingPromptIds?.length) bySession[id] = pendingPromptIds.length;
   }
-  return { total, bySession };
+  return { total: Object.keys(bySession).length, bySession };
+}
+
+/** Fold a streamed `chat.message` into a session's unresolved prompt ids
+ * (permission, plan, question — sub-agent transcripts included): new open
+ * cards are added, answered ones removed. Returns `ids` itself when nothing
+ * changed. */
+export function applyPromptMessage(ids: readonly string[], message: ChatMessage): readonly string[] {
+  const open = new Set(ids);
+  const visit = (parts: readonly ChatPart[]) => {
+    for (const part of parts) {
+      if (part.prompt) {
+        if (part.prompt.resolved) open.delete(part.id);
+        else open.add(part.id);
+      }
+      if (part.children) visit(part.children);
+    }
+  };
+  visit(message.parts);
+  return open.size === ids.length && ids.every((id) => open.has(id)) ? ids : [...open];
 }

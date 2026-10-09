@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { initialMobileNav, mobileNavReducer, mobilePaneView, panelToPane, pendingPrompts } from "../src/mobileNav.ts";
+import { initialMobileNav, mobileNavReducer, mobilePaneView, panelToPane, pendingPrompts, applyPromptMessage } from "../src/mobileNav.ts";
 
 const run = (...events) => events.reduce(mobileNavReducer, initialMobileNav);
 
@@ -102,23 +102,35 @@ test("no pane, or a side chat pane, shows the chat", () => {
 const promptPart = (id, kind, resolved) => ({ id, type: "prompt", prompt: { kind, resolved } });
 const message = (id, parts) => ({ id, role: "assistant", parts, createdAt: 0 });
 
-test("pending prompts count unresolved permission, plan and question cards per session", () => {
-  const sessions = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "unloaded" }];
-  const messages = {
-    a: [
-      message("m1", [{ id: "t", type: "text", text: "hi" }, promptPart("p1", "permission", false)]),
-      message("m2", [promptPart("p2", "plan", false), promptPart("p3", "question", true)]),
-    ],
-    b: [message("m3", [promptPart("p4", "question", false)])],
-    c: [message("m4", [promptPart("p5", "permission", true)])],
-    gone: [message("m5", [promptPart("p6", "permission", false)])],
-  };
-  assert.deepEqual(pendingPrompts(sessions, messages), { total: 3, bySession: { a: 2, b: 1 } });
+test("the badge counts sessions awaiting an answer, across projects", () => {
+  const sessions = [
+    { id: "a", projectId: "p1", pendingPromptIds: ["p1", "p2"] },
+    { id: "b", projectId: "p2", pendingPromptIds: ["p4"] },
+    { id: "c", projectId: "p2", pendingPromptIds: [] },
+    { id: "legacy", projectId: "p1" },
+  ];
+  assert.deepEqual(pendingPrompts(sessions), { total: 2, bySession: { a: 2, b: 1 } });
 });
 
-test("answering a prompt lowers the count", () => {
-  const before = { a: [message("m", [promptPart("p", "permission", false)])] };
-  const after = { a: [message("m", [promptPart("p", "permission", true)])] };
-  assert.equal(pendingPrompts([{ id: "a" }], before).total, 1);
-  assert.deepEqual(pendingPrompts([{ id: "a" }], after), { total: 0, bySession: {} });
+test("a streamed message adds new unresolved prompts, including a sub-agent's", () => {
+  const next = applyPromptMessage([], message("m", [
+    { id: "t", type: "text", text: "hi" },
+    promptPart("p1", "permission", false),
+    { id: "sub", type: "tool", children: [promptPart("p2", "question", false), promptPart("p3", "plan", true)] },
+  ]));
+  assert.deepEqual(next, ["p1", "p2"]);
+});
+
+test("answering a prompt lowers the count immediately", () => {
+  const session = { id: "a", pendingPromptIds: ["p", "q"] };
+  const ids = applyPromptMessage(session.pendingPromptIds, message("m", [promptPart("p", "permission", true)]));
+  assert.deepEqual(ids, ["q"]);
+  const answered = applyPromptMessage(ids, message("m2", [promptPart("q", "plan", true)]));
+  assert.deepEqual(pendingPrompts([{ ...session, pendingPromptIds: answered }]), { total: 0, bySession: {} });
+});
+
+test("a message without prompt changes keeps the same list", () => {
+  const ids = ["p"];
+  assert.equal(applyPromptMessage(ids, message("m", [{ id: "t", type: "text", text: "x" }])), ids);
+  assert.equal(applyPromptMessage(ids, message("m", [promptPart("p", "permission", false)])), ids);
 });
