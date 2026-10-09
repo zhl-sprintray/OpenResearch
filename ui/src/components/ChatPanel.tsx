@@ -183,6 +183,8 @@ import {
   type ModelSelection,
 } from "./ModelPicker";
 import { ContextMeter } from "./ContextMeter";
+import { TranscriptMinimap } from "./TranscriptMinimap";
+import { deriveMinimapItems, type MinimapItem } from "../transcriptMinimap";
 import { renderNote } from "./agentNote";
 import {
   canonicalSkillName,
@@ -3764,6 +3766,7 @@ const Transcript = memo(function Transcript({
   recoveringTurnId,
   onRecover,
   skills,
+  minimapHost,
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
@@ -3791,6 +3794,8 @@ const Transcript = memo(function Transcript({
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
+  /** Non-scrolling overlay of the scroller that hosts the turn minimap. */
+  minimapHost?: HTMLElement | null;
 }) {
   useLocale();
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
@@ -3849,6 +3854,22 @@ const Transcript = memo(function Transcript({
     document.addEventListener("selectionchange", retainSelection);
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
+  const [rowsEl, setRowsEl] = useState<HTMLDivElement | null>(null);
+  const minimapItems = useMemo(() => deriveMinimapItems(visibleMessages), [visibleMessages]);
+  const getRowBounds = useCallback((index: number) => {
+    const row = virtualizer.measurementsCache[index];
+    return row ? { top: row.start, height: row.size } : null;
+  }, [virtualizer]);
+  // Reading position moves away from the tail: stop following new output.
+  const unpinFromBottom = useCallback(() => {
+    stickToBottom.current = false;
+    virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
+  }, [virtualizer, stickToBottom]);
+  const jumpToTurn = useCallback((item: MinimapItem) => {
+    unpinFromBottom();
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    virtualizer.scrollToIndex(item.index, { align: "start", behavior: reduceMotion ? "auto" : "smooth" });
+  }, [virtualizer, unpinFromBottom]);
   const activeMessage = visibleMessages.at(-1);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
@@ -3860,7 +3881,15 @@ const Transcript = memo(function Transcript({
       <button type="button" className="sr-only focus:not-sr-only" aria-pressed={fullHistory} onClick={() => setFullHistory((value) => !value)}>
         {m.chat_show_full_conversation()}
       </button>
-      <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+      <TranscriptMinimap
+        host={minimapHost ?? null}
+        scrollEl={scrollRef.current}
+        columnEl={rowsEl}
+        items={minimapItems}
+        getBounds={getRowBounds}
+        onSelect={jumpToTurn}
+      />
+      <div className="relative" style={{ height: virtualizer.getTotalSize() }} ref={setRowsEl}>
       {virtualizer.getVirtualItems().map((item) => {
         const m = visibleMessages[item.index];
         const turnStatus = m.parts.find(isTurnStatusPart);
@@ -3878,8 +3907,7 @@ const Transcript = memo(function Transcript({
             style={{ top: item.start }}
             onClickCapture={(event) => {
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
-              stickToBottom.current = false;
-              virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
+              unpinFromBottom();
             }}
             onPointerDownCapture={() => retainedRows.current.add(m.id)}
             onFocusCapture={() => retainedRows.current.add(m.id)}
@@ -5465,6 +5493,7 @@ export function ChatPanel({
   const demoHintId = useId();
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
+  const [minimapHost, setMinimapHost] = useState<HTMLDivElement | null>(null);
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     stickToBottom.current = atBottom;
@@ -6584,6 +6613,7 @@ export function ChatPanel({
             )}
           </div>
         ) : (
+          <div className="relative flex flex-1 min-h-0 flex-col" ref={setMinimapHost}>
           <div
             className="chat-thread flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]"
             ref={threadRef}
@@ -6622,6 +6652,7 @@ export function ChatPanel({
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
                   skills={transcriptSkills}
+                  minimapHost={minimapHost}
                 />
                 </PromptPolicyContext.Provider>
               </ChatImageScope>
@@ -6634,6 +6665,7 @@ export function ChatPanel({
                 </div>
               )}
             </div>
+          </div>
           </div>
         )}
 
