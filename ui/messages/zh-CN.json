@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "在访达中显示",
   "sidebar_filter": "筛选",
   "sidebar_group_by": "分组方式",
-  "sidebar_one_list": "单一列表"
+  "sidebar_one_list": "单一列表",
+  "mobile_menu": "菜单",
+  "mobile_close_menu": "关闭菜单",
+  "mobile_back": "返回",
+  "mobile_pending": "待确认",
+  "mobile_desktop_only_title": "仅桌面可用",
+  "mobile_desktop_only_body": "请在电脑上打开 dashboard 使用此功能。"
 }

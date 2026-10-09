@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "نمایش در Finder",
   "sidebar_filter": "فیلتر",
   "sidebar_group_by": "گروه‌بندی بر اساس",
-  "sidebar_one_list": "در یک فهرست"
+  "sidebar_one_list": "در یک فهرست",
+  "mobile_menu": "منو",
+  "mobile_close_menu": "بستن منو",
+  "mobile_back": "بازگشت",
+  "mobile_pending": "در انتظار",
+  "mobile_desktop_only_title": "فقط در دسکتاپ",
+  "mobile_desktop_only_body": "برای استفاده از این بخش، داشبورد را روی رایانه باز کنید."
 }

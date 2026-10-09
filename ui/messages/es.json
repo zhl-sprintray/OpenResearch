@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "Mostrar en Finder",
   "sidebar_filter": "Filtrar",
   "sidebar_group_by": "Agrupar por",
-  "sidebar_one_list": "En una lista"
+  "sidebar_one_list": "En una lista",
+  "mobile_menu": "Menú",
+  "mobile_close_menu": "Cerrar menú",
+  "mobile_back": "Atrás",
+  "mobile_pending": "Pendiente",
+  "mobile_desktop_only_title": "Solo en escritorio",
+  "mobile_desktop_only_body": "Abre el panel en un ordenador para usar esta función."
 }
