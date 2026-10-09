@@ -198,6 +198,8 @@ import {
 } from "../composerCommands";
 import { ResumeDialog } from "./ResumeDialog";
 import { bashCommand, withoutBashPrefix } from "../bashCommand";
+import { acceptsAttachment, attachmentAccept } from "../composerAttachments";
+import { MobileComposerMenu, MobileModelChip } from "./MobileComposer";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import {
@@ -4234,6 +4236,7 @@ export function ChatPanel({
   onPreferredAutonomyChange,
   embedded = false,
   bare = false,
+  composerChips,
   onOpenSideChat,
   children,
 }: {
@@ -4307,6 +4310,9 @@ export function ChatPanel({
   /** Hosted by a shell that draws its own top bar and session navigation
    * (MobileShell): no rail, reopen button, or session header. */
   bare?: boolean;
+  /** Leading controls in the composer's action row (the Mobile layout's
+   * new-session page puts its project chip here). */
+  composerChips?: React.ReactNode;
   /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
   onOpenSideChat?: (parentSessionId: string, question: string) => void;
   /** Middle-pane content when a settings section is active. */
@@ -4323,6 +4329,10 @@ export function ChatPanel({
   const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
   const navigate = useNavigate();
+  // The Mobile layout's composer (bare = hosted by MobileShell): image-only
+  // attachments, no `!` shell, and bottom sheets for model and modes.
+  const mobile = bare;
+  const attachmentKinds = mobile ? "images" : "imagesAndPdf";
   const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
   const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
   const [sidebarGrouping, setSidebarGrouping] = useState<"projects" | "list">(() => {
@@ -4571,7 +4581,7 @@ export function ChatPanel({
     setAttachError(null);
     let total = attachments.reduce((n, a) => n + a.size, 0);
     for (const file of files) {
-      if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
+      if (!acceptsAttachment(file.type, attachmentKinds)) continue;
       if (file.size > MAX_BYTES) {
         setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
         continue;
@@ -4611,8 +4621,7 @@ export function ChatPanel({
     const files = Array.from(e.clipboardData.items)
       .filter(
         (item) =>
-          item.kind === "file" &&
-          (item.type.startsWith("image/") || item.type === "application/pdf"),
+          item.kind === "file" && acceptsAttachment(item.type, attachmentKinds),
       )
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
@@ -4656,7 +4665,7 @@ export function ChatPanel({
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
-  const shellCommand = bashCommand(draft);
+  const shellCommand = mobile ? null : bashCommand(draft);
   const bashMode = shellCommand !== null;
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
@@ -6850,7 +6859,8 @@ export function ChatPanel({
                 ref={composerRef}
                 aria-describedby={demoHintVisible ? demoHintId : undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 bg-transparent"
+                // 16px on phones: iOS zooms into smaller focused inputs.
+                className={`relative z-1 bg-transparent ${mobile ? "text-base" : ""}`}
                 value={draft}
                 placeholder={
                   // A pending question card owns typed text (see send()); say so.
@@ -6888,7 +6898,7 @@ export function ChatPanel({
                   // answer is a note, never a command) and not mid-IME-composition,
                   // where the text can transiently look complete.
                   const completedCommand =
-                    cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
+                    cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && (mobile || bashCommand(v) === null)
                       ? slashCommandContext(v, cursor - 1)
                       : null;
                   const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
@@ -6963,7 +6973,8 @@ export function ChatPanel({
               />
             </div>
             <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
-              <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
+              {composerChips}
+              {!mobile && <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
                 <IconButton
                   type="button"
                   className="composer-bare"
@@ -6981,11 +6992,11 @@ export function ChatPanel({
                     <LitSourcesList />
                   </div>
                 )}
-              </div>
+              </div>}
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
+                accept={attachmentAccept(attachmentKinds)}
                 multiple
                 hidden
                 onChange={(e) => {
@@ -6996,8 +7007,8 @@ export function ChatPanel({
               <IconButton
                 type="button"
                 className="composer-attach"
-                title={m.chat_panel_attach_a_pdf_or_image()}
-                aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                title={mobile ? m.mobile_attach_image() : m.chat_panel_attach_a_pdf_or_image()}
+                aria-label={mobile ? m.mobile_attach_image() : m.chat_panel_attach_a_pdf_or_image()}
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Paperclip size={16} />
@@ -7057,7 +7068,33 @@ export function ChatPanel({
               {/* The model picker reflects the open session (harness locked once it
                 exists); the global default only applies before the first
                 message. */}
-              <div className="flex min-w-0 items-center">
+              {mobile ? (
+                <>
+                  <MobileModelChip value={composerSelection} onSelect={selectModel} lockHarness={!!openSession} openRequest={modelPickerRequest} />
+                  <MobileComposerMenu
+                    plan={activeHarness?.agentReady && (composerSelection?.harness === "claude-code" || opts?.planActivation === "command")
+                      ? { active: planActive, onToggle: () => void togglePlanMode() }
+                      : null}
+                    groups={activeHarness?.agentReady ? [
+                      {
+                        title: m.model_picker_mode(),
+                        // Plan has its own switch above.
+                        choices: (opts?.permissionModes ?? []).filter((choice) => composerSelection?.harness !== "claude-code" || choice.id !== "plan"),
+                        effectiveId: composerSelection?.permissionMode ?? opts?.defaultPermissionMode ?? opts?.permissionModes?.[0]?.id,
+                        defaultId: opts?.defaultPermissionMode ?? null,
+                        onSelect: setPermissionMode,
+                      },
+                      {
+                        title: composerSelection?.harness === "opencode" ? m.model_picker_variant() : m.model_picker_effort(),
+                        choices: reasoning.choices,
+                        effectiveId: composerSelection?.reasoningLevel ?? reasoning.defaultId ?? reasoning.choices[0]?.id,
+                        defaultId: reasoning.defaultId,
+                        onSelect: setReasoningLevel,
+                      },
+                    ] : []}
+                  />
+                </>
+              ) : <div className="flex min-w-0 items-center">
                 <ModelPicker
                   value={composerSelection}
                   onSelect={selectModel}
@@ -7074,7 +7111,7 @@ export function ChatPanel({
                   openRequest={modelPickerRequest}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
-              </div>
+              </div>}
               {busy && !pendingQuestion ? (
                 // Stop whenever the turn is busy and typed text has nowhere to
                 // go — actively streaming, or held on a plan/permission card
