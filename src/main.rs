@@ -667,6 +667,15 @@ pub struct UpArgs {
     /// Internal persistent dashboard/agent-host mode.
     #[arg(long, hide = true)]
     pub remote_host: bool,
+    /// Development only: open the Tunnel port for a tunnel already pointed at
+    /// it, whose public https origin this is. No provider, no pairing yet.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "HTTPS_ORIGIN",
+        conflicts_with_all = ["remote", "remote_host"]
+    )]
+    pub tunnel_origin: Option<String>,
     /// Serving the desktop app's window, which only restarts when asked.
     #[arg(skip)]
     pub desktop_app: bool,

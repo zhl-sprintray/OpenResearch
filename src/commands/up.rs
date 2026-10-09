@@ -23,7 +23,7 @@ use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, MethodRouter};
 use axum::{Json, Router};
 use base64::Engine as _;
 use futures::Stream;
@@ -50,12 +50,18 @@ use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
 mod harness_setup;
+mod tunnel;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
     updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
+    let tunnel_origin = args
+        .tunnel_origin
+        .as_deref()
+        .map(tunnel::TunnelOrigin::new)
+        .transpose()?;
     let remote_auth = if persistent_host {
         let callback = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         local::chat::set_up_auth_token(callback.clone());
@@ -193,6 +199,14 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }));
 
     let app = router(state.clone(), remote_auth.clone());
+    let _tunnel_port = match tunnel_origin {
+        Some(origin) => {
+            let tunnel_port = tunnel::open_tunnel_port(state.clone(), origin).await?;
+            eprintln!("orx up: Tunnel port on 127.0.0.1:{}", tunnel_port.port());
+            Some(tunnel_port)
+        }
+        None => None,
+    };
     let url = format!("http://127.0.0.1:{actual_port}");
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let control_server = if persistent_host {
@@ -500,300 +514,328 @@ impl ProjectLifecycle {
     }
 }
 
-fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
-    let app = Router::new()
-        .route("/api/health", get(health))
-        .route("/api/onboarding/complete", post(complete_onboarding))
-        .route("/api/project-path/status", get(project_path_status))
-        .route("/api/project-path/pick", post(pick_project_folder))
-        .route("/api/git/install", post(install_git))
-        .route("/api/projects", get(list_projects).post(create_project))
-        .route(
-            "/api/projects/starter-prompts/prewarm",
-            post(prewarm_starter_prompts),
-        )
-        .route("/api/projects/activity", get(list_project_activity))
-        .route(
-            "/api/projects/{id}",
-            get(get_project)
-                .patch(update_project)
-                .delete(delete_project),
-        )
-        .route("/api/projects/{id}/open", post(open_project))
-        .route("/api/projects/{id}/git", get(project_git_status))
-        .route(
-            "/api/projects/{id}/starter-prompts",
-            get(project_starter_prompts),
-        )
-        .route("/api/projects/{id}/git/init", post(initialize_project_git))
-        .route("/api/projects/{id}/github", post(enable_project_github))
-        .route(
-            "/api/projects/{id}/github/disable",
-            post(disable_project_github),
-        )
-        .route("/api/projects/{id}/github/push", post(push_project_github))
-        .route("/api/github/account", get(github_account))
-        .route(
-            "/api/github/project-repo-preview",
-            get(github_project_repo_preview),
-        )
-        .route("/api/github/repo-access", get(github_repo_access))
-        .route("/api/projects/{id}/experiments", get(list_experiments))
-        .route("/api/projects/{id}/runs", get(list_project_runs))
-        .route("/api/papers/search", get(search_papers_api))
-        .route("/api/papers/resolve", get(resolve_paper_api))
-        .route("/api/compute/backends", get(compute_backends))
-        .route("/api/runs", post(create_run))
-        .route("/api/runs/{id}", get(get_run))
-        .route("/api/instances", get(list_instances))
-        .route("/api/runs/{id}/cancel", post(cancel_run))
-        .route("/api/runs/{id}/log", get(run_log))
-        .route("/api/runs/{id}/logs", get(run_logs))
-        .route("/api/runs/{id}/diff", get(run_diff))
-        .route("/api/experiments/{id}/diff", get(experiment_diff))
-        .route(
-            "/api/experiments/{id}/archive",
-            axum::routing::patch(set_experiment_archive),
-        )
-        .route("/api/experiments/{id}/commits", get(experiment_commits))
-        .route(
-            "/api/experiments/{id}/commits/{sha}/diff",
-            get(experiment_commit_diff),
-        )
-        .route("/api/projects/{id}/working-tree", get(project_working_tree))
-        .route("/api/projects/{id}/code-tree", get(project_code_tree))
-        .route(
-            "/api/projects/{id}/file",
-            get(project_file)
-                .put(write_project_file)
-                .patch(manage_project_file),
-        )
-        .route("/api/projects/{id}/file/raw", get(project_raw_file))
-        .route("/api/projects/{id}/file/open", post(open_project_file))
-        .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
-        .route("/api/projects/{id}/file/latex", post(compile_project_latex))
-        .route("/api/latex/engine", get(latex_engine))
-        .route(
-            "/api/projects/{id}/file/overleaf",
-            get(overleaf_link)
-                .post(link_overleaf)
-                .delete(unlink_overleaf),
-        )
-        .route("/api/projects/{id}/file/overleaf/sync", post(sync_overleaf))
-        .route(
-            "/api/projects/{id}/file/overleaf/status",
-            get(overleaf_status),
-        )
-        .route(
-            "/api/projects/{id}/file/overleaf/upload",
-            get(overleaf_upload),
-        )
-        .route("/api/overleaf/settings", get(overleaf_settings))
-        .route(
-            "/api/overleaf/token",
-            post(set_overleaf_token).delete(delete_overleaf_token),
-        )
-        .route(
-            "/api/overleaf/session",
-            post(set_overleaf_session).delete(delete_overleaf_session),
-        )
-        .route(
-            "/api/overleaf/session/import",
-            post(import_overleaf_session),
-        )
-        .route(
-            "/api/projects/{id}/file/overleaf/live",
-            post(start_overleaf_live).delete(stop_overleaf_live),
-        )
-        .route("/api/files/abs", get(absolute_file))
-        .route("/api/files/abs/raw", get(absolute_raw_file))
-        .route(
-            "/api/settings/ssh/config",
-            get(ssh_config).put(save_ssh_config),
-        )
-        .route(
-            "/api/projects/{id}/files",
-            get(list_artifacts)
-                .patch(manage_artifact_file)
-                .delete(delete_artifact),
-        )
-        .route("/api/projects/{id}/files/file", get(serve_artifact))
-        .route("/api/projects/{id}/terminal", get(project_terminal))
-        .route("/api/events", get(events))
-        .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
-        .route(
-            "/api/settings/tinker",
-            get(tinker_settings).post(set_tinker_key),
-        )
-        .route(
-            "/api/settings/k8s",
-            get(k8s_settings).post(set_k8s_settings),
-        )
-        .route(
-            "/api/settings/modal",
-            get(modal_settings).post(set_modal_token),
-        )
-        .route("/api/settings/env", get(env_settings).post(set_env_var))
-        .route(
-            "/api/settings/env/{key}",
-            axum::routing::delete(delete_env_var),
-        )
-        .route(
-            "/api/settings/data-dir",
-            get(data_dir_settings).post(set_data_dir),
-        )
-        .route("/api/settings/data-dir/validate", post(validate_data_dir))
-        .route("/api/settings/data-dir/move", post(move_data_dir))
-        .route(
-            "/api/settings/git",
-            get(git_settings).post(set_git_settings),
-        )
-        .route(
-            "/api/settings/projects",
-            get(project_defaults).post(set_project_defaults),
-        )
-        .route(
-            "/api/settings/telemetry",
-            get(telemetry_settings).post(set_telemetry_settings),
-        )
-        .route("/api/telemetry/event", post(record_ui_event))
-        .route("/api/telemetry/locale", post(set_dashboard_locale))
-        .route(
-            "/api/settings/profile",
-            get(profile_settings).post(set_profile_settings),
-        )
-        .route("/api/update", get(update_status))
-        .route("/api/update/apply", post(apply_update))
-        .route("/api/update/restart", post(restart_after_update))
-        .route("/api/update/auto", post(set_auto_update))
-        .route("/api/update/install-cli", post(install_cli))
-        .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
-        .route(
-            "/api/projects/{id}/ui-state",
-            get(project_ui_state).post(set_project_ui_state),
-        )
-        .route(
-            "/api/settings/ssh",
-            get(ssh_settings).post(save_ssh_settings),
-        )
-        .route("/api/settings/ssh/default", post(save_ssh_default))
-        .route("/api/settings/ssh/master", get(ssh_master_status))
-        .route("/api/settings/ssh/preflight", post(ssh_preflight))
-        .route("/api/settings/ssh/connect", get(ssh_connect))
-        .route(
-            "/api/remote/sessions",
-            get(remote_sessions).post(create_remote_session),
-        )
-        .route("/api/remote/sessions/{id}", get(remote_session))
-        .route(
-            "/api/remote/sessions/{id}/reconnect",
-            post(reconnect_remote_session),
-        )
-        .route(
-            "/api/remote/sessions/{id}/disconnect",
-            post(disconnect_remote_session),
-        )
-        .route("/_orx/runtime", get(local_runtime))
-        .route(
-            "/api/settings/slurm",
-            get(slurm_settings).post(set_slurm_settings),
-        )
-        .route("/api/settings/slurm/preflight", post(slurm_preflight))
-        .route(
-            "/api/settings/ray",
-            get(ray_settings).post(set_ray_settings),
-        )
-        .route("/api/settings/ray/preflight", post(ray_preflight))
-        .route("/api/settings/compute", get(compute_settings))
-        .route("/api/settings/compute/default", post(set_compute_default))
-        .route("/api/settings/local", get(local_machine_settings))
-        .route("/api/settings/openresearch", get(openresearch_settings))
-        .route("/api/settings/openresearch/login", get(openresearch_login))
-        .route("/api/settings/commands/run", get(run_settings_command))
-        .route(
-            "/api/settings/openresearch/ssh-key",
-            get(openresearch_ssh_key),
-        )
-        .route(
-            "/api/settings/lit-sources",
-            get(lit_sources_settings).post(set_lit_sources_settings),
-        )
-        .route("/api/harnesses", get(list_harnesses))
-        .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
-        .route(
-            "/api/harnesses/setup/commands",
-            get(harness_setup::commands),
-        )
-        .route("/api/harnesses/setup", get(harness_setup::connect))
-        .route(
-            "/api/local-models",
-            get(list_local_models).post(connect_local_model),
-        )
-        .route("/api/local-models/discover", post(discover_local_models))
-        .route("/api/local-models/{id}/check", post(check_local_model))
-        .route(
-            "/api/local-models/{id}",
-            axum::routing::delete(remove_local_model),
-        )
-        .route("/api/skills", get(list_skills))
-        .route("/api/skills/{name}", get(get_skill))
-        .route(
-            "/api/user-skills",
-            get(list_user_skills)
-                .post(upload_user_skill)
-                .delete(delete_user_skill),
-        )
-        .route(
-            "/api/latex-templates",
-            get(list_latex_templates)
-                .post(upload_latex_template)
-                .delete(delete_latex_template),
-        )
-        .route(
-            "/api/chat/sessions",
-            get(list_chat_sessions).post(create_chat_session),
-        )
-        .route(
-            "/api/chat/sessions/{id}",
-            axum::routing::delete(delete_chat_session).patch(update_chat_session),
-        )
-        .route("/api/chat/sessions/{id}/messages", get(chat_messages))
-        .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
-        .route("/api/chat/sessions/{id}/message", post(send_chat_message))
-        .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
-        .route(
-            "/api/chat/sessions/{id}/compact",
-            post(compact_chat_session),
-        )
-        .route("/api/chat/native-sessions", get(list_native_chats))
-        .route("/api/chat/native-sessions/import", post(import_native_chat))
-        .route(
-            "/api/chat/sessions/{id}/turns/{turnId}/recover",
-            post(recover_chat_turn),
-        )
-        .route("/api/chat/sessions/{id}/side", post(open_side_chat))
-        .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
-        .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
-        .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
-        .route(
-            "/api/chat/sessions/{id}/queue/{itemId}",
-            axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
-        )
-        .route("/api/chat/sessions/{id}/respond", post(respond_chat))
-        // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
-        // mode). Token-authenticated in the handler; blocks until the surfaced
-        // card is answered.
-        .route("/api/internal/permissions", post(bridge_permission))
-        .route("/api/chat/attachments/{name}", get(chat_attachment))
-        .route("/api/agent/status", get(agent_status))
+/// The dashboard's routes, with every registered path recorded so Tunnel
+/// access can prove each one is classified (see `tunnel::classify`).
+struct RouteTable {
+    router: Router<AppState>,
+    paths: Vec<&'static str>,
+}
+
+impl RouteTable {
+    fn route(mut self, path: &'static str, method_router: MethodRouter<AppState>) -> Self {
+        self.router = self.router.route(path, method_router);
+        self.paths.push(path);
+        self
+    }
+}
+
+fn routes() -> RouteTable {
+    RouteTable {
+        router: Router::new(),
+        paths: Vec::new(),
+    }
+    .route("/api/health", get(health))
+    .route("/api/onboarding/complete", post(complete_onboarding))
+    .route("/api/project-path/status", get(project_path_status))
+    .route("/api/project-path/pick", post(pick_project_folder))
+    .route("/api/git/install", post(install_git))
+    .route("/api/projects", get(list_projects).post(create_project))
+    .route(
+        "/api/projects/starter-prompts/prewarm",
+        post(prewarm_starter_prompts),
+    )
+    .route("/api/projects/activity", get(list_project_activity))
+    .route(
+        "/api/projects/{id}",
+        get(get_project)
+            .patch(update_project)
+            .delete(delete_project),
+    )
+    .route("/api/projects/{id}/open", post(open_project))
+    .route("/api/projects/{id}/git", get(project_git_status))
+    .route(
+        "/api/projects/{id}/starter-prompts",
+        get(project_starter_prompts),
+    )
+    .route("/api/projects/{id}/git/init", post(initialize_project_git))
+    .route("/api/projects/{id}/github", post(enable_project_github))
+    .route(
+        "/api/projects/{id}/github/disable",
+        post(disable_project_github),
+    )
+    .route("/api/projects/{id}/github/push", post(push_project_github))
+    .route("/api/github/account", get(github_account))
+    .route(
+        "/api/github/project-repo-preview",
+        get(github_project_repo_preview),
+    )
+    .route("/api/github/repo-access", get(github_repo_access))
+    .route("/api/projects/{id}/experiments", get(list_experiments))
+    .route("/api/projects/{id}/runs", get(list_project_runs))
+    .route("/api/papers/search", get(search_papers_api))
+    .route("/api/papers/resolve", get(resolve_paper_api))
+    .route("/api/compute/backends", get(compute_backends))
+    .route("/api/runs", post(create_run))
+    .route("/api/runs/{id}", get(get_run))
+    .route("/api/instances", get(list_instances))
+    .route("/api/runs/{id}/cancel", post(cancel_run))
+    .route("/api/runs/{id}/log", get(run_log))
+    .route("/api/runs/{id}/logs", get(run_logs))
+    .route("/api/runs/{id}/diff", get(run_diff))
+    .route("/api/experiments/{id}/diff", get(experiment_diff))
+    .route(
+        "/api/experiments/{id}/archive",
+        axum::routing::patch(set_experiment_archive),
+    )
+    .route("/api/experiments/{id}/commits", get(experiment_commits))
+    .route(
+        "/api/experiments/{id}/commits/{sha}/diff",
+        get(experiment_commit_diff),
+    )
+    .route("/api/projects/{id}/working-tree", get(project_working_tree))
+    .route("/api/projects/{id}/code-tree", get(project_code_tree))
+    .route(
+        "/api/projects/{id}/file",
+        get(project_file)
+            .put(write_project_file)
+            .patch(manage_project_file),
+    )
+    .route("/api/projects/{id}/file/raw", get(project_raw_file))
+    .route("/api/projects/{id}/file/open", post(open_project_file))
+    .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
+    .route("/api/projects/{id}/file/latex", post(compile_project_latex))
+    .route("/api/latex/engine", get(latex_engine))
+    .route(
+        "/api/projects/{id}/file/overleaf",
+        get(overleaf_link)
+            .post(link_overleaf)
+            .delete(unlink_overleaf),
+    )
+    .route("/api/projects/{id}/file/overleaf/sync", post(sync_overleaf))
+    .route(
+        "/api/projects/{id}/file/overleaf/status",
+        get(overleaf_status),
+    )
+    .route(
+        "/api/projects/{id}/file/overleaf/upload",
+        get(overleaf_upload),
+    )
+    .route("/api/overleaf/settings", get(overleaf_settings))
+    .route(
+        "/api/overleaf/token",
+        post(set_overleaf_token).delete(delete_overleaf_token),
+    )
+    .route(
+        "/api/overleaf/session",
+        post(set_overleaf_session).delete(delete_overleaf_session),
+    )
+    .route(
+        "/api/overleaf/session/import",
+        post(import_overleaf_session),
+    )
+    .route(
+        "/api/projects/{id}/file/overleaf/live",
+        post(start_overleaf_live).delete(stop_overleaf_live),
+    )
+    .route("/api/files/abs", get(absolute_file))
+    .route("/api/files/abs/raw", get(absolute_raw_file))
+    .route(
+        "/api/settings/ssh/config",
+        get(ssh_config).put(save_ssh_config),
+    )
+    .route(
+        "/api/projects/{id}/files",
+        get(list_artifacts)
+            .patch(manage_artifact_file)
+            .delete(delete_artifact),
+    )
+    .route("/api/projects/{id}/files/file", get(serve_artifact))
+    .route("/api/projects/{id}/terminal", get(project_terminal))
+    .route("/api/events", get(events))
+    .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
+    .route(
+        "/api/settings/tinker",
+        get(tinker_settings).post(set_tinker_key),
+    )
+    .route(
+        "/api/settings/k8s",
+        get(k8s_settings).post(set_k8s_settings),
+    )
+    .route(
+        "/api/settings/modal",
+        get(modal_settings).post(set_modal_token),
+    )
+    .route("/api/settings/env", get(env_settings).post(set_env_var))
+    .route(
+        "/api/settings/env/{key}",
+        axum::routing::delete(delete_env_var),
+    )
+    .route(
+        "/api/settings/data-dir",
+        get(data_dir_settings).post(set_data_dir),
+    )
+    .route("/api/settings/data-dir/validate", post(validate_data_dir))
+    .route("/api/settings/data-dir/move", post(move_data_dir))
+    .route(
+        "/api/settings/git",
+        get(git_settings).post(set_git_settings),
+    )
+    .route(
+        "/api/settings/projects",
+        get(project_defaults).post(set_project_defaults),
+    )
+    .route(
+        "/api/settings/telemetry",
+        get(telemetry_settings).post(set_telemetry_settings),
+    )
+    .route("/api/telemetry/event", post(record_ui_event))
+    .route("/api/telemetry/locale", post(set_dashboard_locale))
+    .route(
+        "/api/settings/profile",
+        get(profile_settings).post(set_profile_settings),
+    )
+    .route("/api/update", get(update_status))
+    .route("/api/update/apply", post(apply_update))
+    .route("/api/update/restart", post(restart_after_update))
+    .route("/api/update/auto", post(set_auto_update))
+    .route("/api/update/install-cli", post(install_cli))
+    .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
+    .route(
+        "/api/projects/{id}/ui-state",
+        get(project_ui_state).post(set_project_ui_state),
+    )
+    .route(
+        "/api/settings/ssh",
+        get(ssh_settings).post(save_ssh_settings),
+    )
+    .route("/api/settings/ssh/default", post(save_ssh_default))
+    .route("/api/settings/ssh/master", get(ssh_master_status))
+    .route("/api/settings/ssh/preflight", post(ssh_preflight))
+    .route("/api/settings/ssh/connect", get(ssh_connect))
+    .route(
+        "/api/remote/sessions",
+        get(remote_sessions).post(create_remote_session),
+    )
+    .route("/api/remote/sessions/{id}", get(remote_session))
+    .route(
+        "/api/remote/sessions/{id}/reconnect",
+        post(reconnect_remote_session),
+    )
+    .route(
+        "/api/remote/sessions/{id}/disconnect",
+        post(disconnect_remote_session),
+    )
+    .route("/_orx/runtime", get(local_runtime))
+    .route(
+        "/api/settings/slurm",
+        get(slurm_settings).post(set_slurm_settings),
+    )
+    .route("/api/settings/slurm/preflight", post(slurm_preflight))
+    .route(
+        "/api/settings/ray",
+        get(ray_settings).post(set_ray_settings),
+    )
+    .route("/api/settings/ray/preflight", post(ray_preflight))
+    .route("/api/settings/compute", get(compute_settings))
+    .route("/api/settings/compute/default", post(set_compute_default))
+    .route("/api/settings/local", get(local_machine_settings))
+    .route("/api/settings/openresearch", get(openresearch_settings))
+    .route("/api/settings/openresearch/login", get(openresearch_login))
+    .route("/api/settings/commands/run", get(run_settings_command))
+    .route(
+        "/api/settings/openresearch/ssh-key",
+        get(openresearch_ssh_key),
+    )
+    .route(
+        "/api/settings/lit-sources",
+        get(lit_sources_settings).post(set_lit_sources_settings),
+    )
+    .route("/api/harnesses", get(list_harnesses))
+    .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
+    .route(
+        "/api/harnesses/setup/commands",
+        get(harness_setup::commands),
+    )
+    .route("/api/harnesses/setup", get(harness_setup::connect))
+    .route(
+        "/api/local-models",
+        get(list_local_models).post(connect_local_model),
+    )
+    .route("/api/local-models/discover", post(discover_local_models))
+    .route("/api/local-models/{id}/check", post(check_local_model))
+    .route(
+        "/api/local-models/{id}",
+        axum::routing::delete(remove_local_model),
+    )
+    .route("/api/skills", get(list_skills))
+    .route("/api/skills/{name}", get(get_skill))
+    .route(
+        "/api/user-skills",
+        get(list_user_skills)
+            .post(upload_user_skill)
+            .delete(delete_user_skill),
+    )
+    .route(
+        "/api/latex-templates",
+        get(list_latex_templates)
+            .post(upload_latex_template)
+            .delete(delete_latex_template),
+    )
+    .route(
+        "/api/chat/sessions",
+        get(list_chat_sessions).post(create_chat_session),
+    )
+    .route(
+        "/api/chat/sessions/{id}",
+        axum::routing::delete(delete_chat_session).patch(update_chat_session),
+    )
+    .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+    .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
+    .route("/api/chat/sessions/{id}/message", post(send_chat_message))
+    .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
+    .route(
+        "/api/chat/sessions/{id}/compact",
+        post(compact_chat_session),
+    )
+    .route("/api/chat/native-sessions", get(list_native_chats))
+    .route("/api/chat/native-sessions/import", post(import_native_chat))
+    .route(
+        "/api/chat/sessions/{id}/turns/{turnId}/recover",
+        post(recover_chat_turn),
+    )
+    .route("/api/chat/sessions/{id}/side", post(open_side_chat))
+    .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
+    .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
+    .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
+    .route(
+        "/api/chat/sessions/{id}/queue/{itemId}",
+        axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
+    )
+    .route("/api/chat/sessions/{id}/respond", post(respond_chat))
+    // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
+    // mode). Token-authenticated in the handler; blocks until the surfaced
+    // card is answered.
+    .route("/api/internal/permissions", post(bridge_permission))
+    .route("/api/chat/attachments/{name}", get(chat_attachment))
+    .route("/api/agent/status", get(agent_status))
+}
+
+/// Routes plus SPA fallback over the shared state, before any listener's guards.
+fn app(state: AppState) -> Router {
+    routes()
+        .router
         .fallback(spa)
         // Chat attachments (PDFs, images) ride as base64 in the send-message
         // JSON body; the 2 MB axum default rejects any real paper. Cap it well
         // above the client-side per-file limit so a full message still fits.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(state);
-    let app = app
+        .with_state(state)
+}
+
+fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
+    let app = app(state)
         .layer(middleware::from_fn(track_active))
+        .layer(middleware::from_fn(tunnel::reject_tunnel_proxy_headers))
         .layer(middleware::from_fn(
             crate::commands::up_remote::loopback_guard,
         ));
@@ -8157,6 +8199,31 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `AppState` like `run`'s, without a dashboard lock or background tasks.
+    pub(super) fn test_state() -> AppState {
+        let agent = Arc::new(AgentHost::new(None));
+        let codex = Arc::new(local::codex::CodexHost::new());
+        let claude = Arc::new(local::claude::ClaudeHost::new());
+        AppState {
+            agent: agent.clone(),
+            chat: Arc::new(ChatHost::new(agent, codex, claude.clone())),
+            claude,
+            harnesses: Arc::new(tokio::sync::Mutex::new(None)),
+            project_lifecycle: Arc::new(ProjectLifecycle::default()),
+            project_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            harness_fill_in_flight: Arc::new(AtomicBool::new(false)),
+            claude_catalog_queue: Arc::new(std::sync::Mutex::new(ClaudeCatalogQueue::default())),
+            data_dir_move_in_progress: Arc::new(AtomicBool::new(false)),
+            data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
+            remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
+            remote_instance_id: None,
+            stopping: Arc::new(AtomicBool::new(false)),
+            dashboard_lock: Arc::new(std::sync::Mutex::new(None)),
+            restart: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 
     #[tokio::test]
     async fn empty_local_error_reports_the_http_status() {

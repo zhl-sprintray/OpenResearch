@@ -1213,7 +1213,7 @@ async fn loopback_guard_inner(request: Request, next: Next, allow_dev_origin: bo
     secure_response(next.run(request).await)
 }
 
-fn secure_response(mut response: Response) -> Response {
+pub(crate) fn secure_response(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(
         "x-content-type-options",
