@@ -1057,8 +1057,10 @@ export interface RemoteSessionInfo {
   canStartNewHost: boolean;
 }
 
+/** `tunnelAccess` is true when this request came over Tunnel access; the UI
+ * hides what the Tunnel allowlist refuses (the server enforces it anyway). */
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
+  | { kind: "local"; version: string; tunnelAccess?: boolean }
   | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
@@ -1489,6 +1491,65 @@ export const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/a
 
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
+
+/** Tunnel provider state from `GET /api/tunnel/access`. */
+export type TunnelProviderState =
+  | "not-installed"
+  | "logged-out"
+  | "unavailable"
+  | "conflict"
+  | "ready"
+  | "starting"
+  | "connected"
+  | "disconnected";
+
+export interface TunnelStatus {
+  enabled: boolean;
+  provider: string;
+  state: TunnelProviderState;
+  /** The https origin the tunnel publishes (or would publish once on). */
+  origin: string | null;
+  /** The provider's explanation (English, from the server). */
+  message: string | null;
+  /** Why this dashboard can never turn Tunnel access on. */
+  blocked: "remote" | "dev-slot" | null;
+}
+
+export interface TunnelDevice {
+  id: string;
+  name: string;
+  pairedAt: number;
+  lastSeenAt: number;
+}
+
+export interface TunnelPairingCode {
+  code: string;
+  /** `/pair#<code>`, relative to the tunnel origin. */
+  path: string;
+  expiresAt: number;
+}
+
+/** Tunnel access and device management live on the original port only. */
+export const getTunnelAccess = (signal?: AbortSignal) => get<TunnelStatus>("/api/tunnel/access", signal);
+export const setTunnelAccess = (enabled: boolean) => put<TunnelStatus>("/api/tunnel/access", { enabled });
+export const listTunnelDevices = (signal?: AbortSignal) => get<TunnelDevice[]>("/api/tunnel/devices", signal);
+export const mintTunnelPairingCode = () => post<TunnelPairingCode>("/api/tunnel/pairing-codes");
+export const revokeAllTunnelDevices = () =>
+  writeResponse("/api/tunnel/devices", { method: "DELETE" }).then((r) => json<{ revoked: number }>(r));
+
+async function noContent(response: Response): Promise<void> {
+  if (response.ok) return;
+  await json<unknown>(response);
+}
+
+export const renameTunnelDevice = (id: string, name: string) =>
+  writeResponse(`/api/tunnel/devices/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).then(noContent);
+export const revokeTunnelDevice = (id: string) =>
+  writeResponse(`/api/tunnel/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(noContent);
 
 export type OnboardingStep = "welcome" | "environment" | "profile";
 export type FirstActionSurface = "demo" | "project";
@@ -1935,6 +1996,9 @@ export interface ChatSession {
   busy: boolean;
   activeLeafId: string | null;
   contextUsage?: ContextUsage;
+  /** Unresolved prompt cards (permission, plan, question) awaiting the user,
+   * server-computed on a project's session list; absent on `chat.session` events. */
+  pendingPromptIds?: readonly string[];
 }
 
 export const listChatSessions = (projectId: string, signal?: AbortSignal) =>

@@ -278,6 +278,7 @@ fn valid_location(location: &str) -> bool {
                             | "environment"
                             | "git"
                             | "storage"
+                            | "tunnel"
                     )
                 })
         }
@@ -371,6 +372,7 @@ mod tests {
         );
         assert!(valid_location(&location));
         assert!(valid_location("/projects/demo/settings/%67it"));
+        assert!(valid_location("/projects/demo/settings/tunnel"));
         assert!(valid_location(&format!(
             "/projects/demo/tasks/new?%70ane={}&",
             urlencoding::encode(&pane.to_string())

@@ -130,6 +130,7 @@ import { StatusBadge } from "./StatusBadge";
 import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
 import { SshConfigDialog } from "./SshConfigDialog";
+import { TunnelAccessSettings } from "./TunnelAccessSettings";
 import {
   Badge,
   Button,
@@ -3698,7 +3699,7 @@ type SettingsNavItem = {
   activeTabs: Tab[];
 };
 
-const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
+const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage", "tunnel"];
 
 /** Primary rail entries. Configuration sections share the Settings entry. */
 export const SETTINGS_NAV: SettingsNavItem[] = [
@@ -3775,6 +3776,9 @@ export function SettingsView({
                 <StorageTab />
               </section>
             )}
+            <section ref={tab === "tunnel" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <TunnelAccessSettings remote={remote} />
+            </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <TelemetryTab />
             </section>

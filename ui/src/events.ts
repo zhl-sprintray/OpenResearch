@@ -13,6 +13,7 @@ import type {
   Project,
   QueuedMessage,
   Run,
+  TunnelDevice,
   UpdateStatus,
 } from "./api";
 
@@ -175,6 +176,18 @@ export function onUpdateStatus(fn: UpdateStatusListener): () => void {
 
 function emitUpdateStatus(status: UpdateStatus) {
   updateStatusListeners.forEach((fn) => fn(status));
+}
+
+// A device just paired over Tunnel access: the desktop dashboard toasts it so a
+// pairing nobody here started is noticed.
+type TunnelDevicePairedListener = (device: TunnelDevice) => void;
+const tunnelDevicePairedListeners = new Set<TunnelDevicePairedListener>();
+
+export function onTunnelDevicePaired(fn: TunnelDevicePairedListener): () => void {
+  tunnelDevicePairedListeners.add(fn);
+  return () => {
+    tunnelDevicePairedListeners.delete(fn);
+  };
 }
 
 // Connection state for the whole dashboard: the one EventSource is also the only
@@ -371,6 +384,10 @@ export function useOrxEventStream(handlers: OrxEventHandlers) {
       es.addEventListener("update.status", (e) => {
         const d = parse<UpdateStatus>(e as MessageEvent);
         if (d) emitUpdateStatus(d);
+      });
+      es.addEventListener("tunnel.device_paired", (e) => {
+        const d = parse<TunnelDevice>(e as MessageEvent);
+        if (d?.id) tunnelDevicePairedListeners.forEach((fn) => fn(d));
       });
       es.addEventListener("overleaf.live", (e) => {
         const d = parse<{ key: string; status: OverleafLiveStatus }>(e as MessageEvent);

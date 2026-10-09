@@ -206,16 +206,16 @@ export function ArtifactMarkdown({
   );
 }
 
-type PreviewKind = "markdown" | MediaPreviewKind | "text" | "download";
+export type PreviewKind = "markdown" | MediaPreviewKind | "text" | "download";
 
-function previewKind(entry: ArtifactEntry): PreviewKind {
+export function previewKind(entry: ArtifactEntry): PreviewKind {
   if (entry.presentation === "text" && isMarkdownFile(entry.name)) return "markdown";
   return mediaPreviewKind(entry.presentation) ??
     (entry.presentation === "text" || entry.presentation === "unknown" ? "text" : "download");
 }
 
 /** Fetched body for kinds that need text: markdown or raw text. */
-function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
+export function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
   const wantsText = kind === "markdown" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
   const options = getArtifactFileTextQuery(projectId, entry.path);
   const query = useQuery({ ...options, enabled: wantsText, subscribed: wantsText });
@@ -248,7 +248,8 @@ function PreviewPane({
 }: {
   projectId: string;
   entry: ArtifactEntry;
-  onDelete: (path: string) => void;
+  /** Absent where this connection can't change artifacts. */
+  onDelete?: (path: string) => void;
   artifactEntries: ArtifactEntry[];
 }) {
   const kind = previewKind(entry);
@@ -339,7 +340,7 @@ function PreviewPane({
         >
           <ExternalLink size={13} />
         </IconButtonLink>
-        <IconButton
+        {onDelete && <IconButton
           size="small"
           data-tip={m.artifacts_tab_delete_artifact()}
           data-tip-align="end"
@@ -350,7 +351,7 @@ function PreviewPane({
           }}
         >
           <Trash2 size={13} />
-        </IconButton>
+        </IconButton>}
       </div>
       <div className={`fpreview-body flex-1 min-h-0 overflow-auto [&.doc]:pt-4.5 [&.doc]:px-7 [&.doc]:pb-12 [&.doc_.artifact-md]:max-w-readable [&.doc_.artifact-md]:my-0 [&.doc_.artifact-md]:mx-auto ${isDoc && !showSource ? "doc" : ""}`}>
         {body}
@@ -385,7 +386,7 @@ function TreeRows({
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
   onOpenFile: (path: string) => void;
-  onDelete: (path: string) => void;
+  onDelete?: (path: string) => void;
   renamingPath: string | null;
   onContextMenu: (event: FileContextMenuEvent, path: string) => void;
   onRename: (path: string, name: string) => void;
@@ -411,7 +412,7 @@ function TreeRows({
                   <ChevronRight size={13} className={open ? "open" : ""} />
                 </button>
                 <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{e.name}</span>
-                <IconButton size="small"
+                {onDelete && <IconButton size="small"
                   className="ft-row-delete opacity-35 focus-visible:opacity-100"
                   data-tip={m.artifacts_tab_delete_folder()}
                   data-tip-align="end"
@@ -423,7 +424,7 @@ function TreeRows({
                   }}
                 >
                   <Trash2 size={12} />
-                </IconButton>
+                </IconButton>}
               </div>
               {open && (e.children?.length ?? 0) > 0 && (
                 <TreeRows
@@ -521,11 +522,14 @@ export function ArtifactsTab({
   artifacts,
   onOpenFile,
   canRenameFile,
+  editable = true,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
   onOpenFile: (path: string) => void;
   canRenameFile: (path: string) => boolean;
+  /** False where this connection can't rename, duplicate or delete artifacts. */
+  editable?: boolean;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   // Folders are open by default — including ones that appear later — so this
@@ -632,10 +636,10 @@ export function ArtifactsTab({
       onToggle={toggle}
       onSelect={setSelected}
       onOpenFile={onOpenFile}
-      onDelete={remove}
+      onDelete={editable ? remove : undefined}
       renamingPath={renamingPath}
       onContextMenu={(event, path) => {
-        setContextMenu(fileContextMenuTarget(event, path));
+        if (editable) setContextMenu(fileContextMenuTarget(event, path));
       }}
       onRename={(path, name) => {
         setRenamingPath(null);
@@ -674,7 +678,7 @@ export function ArtifactsTab({
           key={selectedEntry.path}
           projectId={project.id}
           entry={selectedEntry}
-          onDelete={remove}
+          onDelete={editable ? remove : undefined}
           artifactEntries={artifacts.entries}
         />
       ) : (

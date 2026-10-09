@@ -160,17 +160,19 @@ export function removeSlashCommand(
 /** Plan is the one command a harness can lack; the rest are the dashboard's own. */
 function availableCommands(
   planActivation: "permission" | "command" | null | undefined,
+  hidden: readonly ComposerCommandName[] = [],
 ): ComposerCommandName[] {
-  return COMPOSER_COMMANDS.filter((name) => name !== "plan" || planActivation);
+  return COMPOSER_COMMANDS.filter((name) => (name !== "plan" || planActivation) && !hidden.includes(name));
 }
 
 export function commandsForHarness(
   skills: SkillInfo[],
   planActivation: "permission" | "command" | null | undefined,
+  hidden: readonly ComposerCommandName[] = [],
 ): SkillInfo[] {
   // Keep dashboard commands ahead of skills with the same name or alias.
   const availableSkills = skills.filter((skill) => !resolveComposerCommand(skill.name));
-  for (const name of availableCommands(planActivation)) availableSkills.push(composerCommand(name));
+  for (const name of availableCommands(planActivation, hidden)) availableSkills.push(composerCommand(name));
   return availableSkills.sort((a, b) => {
     const group = Number(b.source === "command") - Number(a.source === "command");
     return group || commandLabel(a).localeCompare(commandLabel(b), undefined, { sensitivity: "base" });
@@ -189,8 +191,9 @@ export function takesArgument(name: ComposerCommandName): boolean {
 export function parseComposerCommand(
   text: string,
   planActivation: "permission" | "command" | null | undefined,
+  hidden: readonly ComposerCommandName[] = [],
 ): { name: ComposerCommandName; prompt: string } | null {
-  for (const name of availableCommands(planActivation).sort((a, b) => Number(a === "plan") - Number(b === "plan"))) {
+  for (const name of availableCommands(planActivation, hidden).sort((a, b) => Number(a === "plan") - Number(b === "plan"))) {
     const spellings = [name, ...aliasesOf(name)].join("|");
     if (name === "plan") {
       const token = new RegExp(`(^|\\s)\\/(?:${spellings})(?=\\s|$)`, "gi");

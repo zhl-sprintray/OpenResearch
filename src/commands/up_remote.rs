@@ -1133,6 +1133,9 @@ fn gateway_router(session: Arc<RemoteSession>) -> Router {
         .fallback(gateway_fallback)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(middleware::from_fn(super::up::track_active))
+        // Checked before `proxy_request` strips forwarding headers, so a
+        // tunnel aimed here is refused rather than laundered.
+        .layer(middleware::from_fn(super::up::reject_tunnel_proxy_headers))
         .layer(middleware::from_fn(gateway_loopback_guard))
         .with_state(session)
 }
@@ -1213,7 +1216,7 @@ async fn loopback_guard_inner(request: Request, next: Next, allow_dev_origin: bo
     secure_response(next.run(request).await)
 }
 
-fn secure_response(mut response: Response) -> Response {
+pub(crate) fn secure_response(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(
         "x-content-type-options",
@@ -2307,6 +2310,33 @@ mod tests {
             dev_origin: None,
             expected_instance: std::sync::RwLock::new(None),
         }
+    }
+
+    /// A tunnel aimed at the Remote gateway fails loudly, as on the original
+    /// port, instead of reaching the remote dashboard with no authentication.
+    #[tokio::test]
+    async fn the_gateway_refuses_requests_a_tunnel_forwarded() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = gateway_router(Arc::new(sample_session()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = crate::net::loopback_client().build().unwrap();
+        let url = format!("http://127.0.0.1:{port}/_orx/runtime");
+
+        for header in ["x-forwarded-for", "forwarded", "tailscale-user-login"] {
+            let response = client
+                .get(&url)
+                .header(header, "203.0.113.7")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 421, "{header}");
+        }
+        let local = client.get(&url).send().await.unwrap();
+        assert_eq!(local.status(), 200);
+        server.abort();
     }
 
     #[test]

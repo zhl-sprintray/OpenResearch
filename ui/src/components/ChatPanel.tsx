@@ -1,6 +1,6 @@
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
-import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { fitSidebarRows, readSidebarIds, sidebarProjectSessions, sidebarRowHeight, sortSidebarProjects, toggleId, writeSidebarIds, type SessionFilter, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
@@ -62,8 +62,10 @@ import {
   X,
 } from "lucide-react";
 import {
+  createContext,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -123,6 +125,7 @@ import {
   type StarterPrompt,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
+import { approveOnComputer, capabilities, hiddenComposerCommands, permissionPicker } from "../capabilities";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   splitTurnParts,
@@ -166,7 +169,7 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { ChatImageScope, Md } from "./Md";
+import { ChatImageScope, FileOpenableContext, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
@@ -200,6 +203,9 @@ import {
 } from "../composerCommands";
 import { ResumeDialog } from "./ResumeDialog";
 import { bashCommand, withoutBashPrefix } from "../bashCommand";
+import { composerPlaceholder } from "../composerPlaceholder";
+import { acceptsAttachment, attachmentAccept } from "../composerAttachments";
+import { MobileComposerMenu, MobileModelChip } from "./MobileComposer";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import {
@@ -1969,6 +1975,7 @@ function ToolActivityLabel({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
+  const fileOpenable = useContext(FileOpenableContext);
   if (activity.searchPattern) {
     return activity.label;
   }
@@ -1985,7 +1992,12 @@ function ToolActivityLabel({
       </a>
     );
   }
-  if (activity.filePath && activity.labelTarget && onOpenFile) {
+  if (
+    activity.filePath &&
+    activity.labelTarget &&
+    onOpenFile &&
+    (!fileOpenable || fileOpenable(activity.filePath))
+  ) {
     const filePath = activity.filePath;
     return (
       <span
@@ -2580,6 +2592,19 @@ function ToolGroup({
   );
 }
 
+/** How this connection may answer prompt cards (Tunnel access narrows it);
+ * the chat panel provides it for its active session. */
+interface PromptPolicy {
+  /** The permission card must be approved on the computer (`approveOnComputer`). */
+  approveOnComputer: (prompt: ChatPrompt) => boolean;
+  /** A plan approval may pick its resume mode (`Capabilities.planResumeModes`). */
+  planResumeModes: boolean;
+}
+const PromptPolicyContext = createContext<PromptPolicy>({
+  approveOnComputer: () => false,
+  planResumeModes: true,
+});
+
 /** Interactive card for a plan / permission / question prompt. Approving (or
  * answering) resumes the session. Once resolved, cards mirror Claude Code:
  * a permission leaves no trace, a plan collapses to an expandable
@@ -2598,6 +2623,8 @@ function PromptCard({
 }) {
   const p = part.prompt as ChatPrompt;
   const [picked, setPicked] = useState<string[]>([]);
+  const policy = useContext(PromptPolicyContext);
+  const onComputer = policy.approveOnComputer(p);
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
   const done = !onRespond;
 
@@ -2699,12 +2726,20 @@ function PromptCard({
             provides onOpenPlan): same action semantics as the strip. */}
         {!done && !docked && (
           <div className={PROMPT_ACTIONS_CLASS_NAME}>
-            <Button size="small" variant="primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
-              {m.chat_panel_accept_and_auto_mode()}
-            </Button>
-            <Button size="small" onClick={() => respond({ approve: true, resumeMode: "bypassPermissions" })}>
-              {m.chat_panel_accept_and_bypass_all()}
-            </Button>
+            {policy.planResumeModes ? (
+              <>
+                <Button size="small" variant="primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
+                  {m.chat_panel_accept_and_auto_mode()}
+                </Button>
+                <Button size="small" onClick={() => respond({ approve: true, resumeMode: "bypassPermissions" })}>
+                  {m.chat_panel_accept_and_bypass_all()}
+                </Button>
+              </>
+            ) : (
+              <Button size="small" variant="primary" onClick={() => respond({ approve: true })}>
+                {m.plan_strip_accept_plan()}
+              </Button>
+            )}
             <Button size="small" onClick={() => respond({ approve: false })}>
               {m.chat_panel_reject()}
             </Button>
@@ -2751,6 +2786,11 @@ function PromptCard({
             // blocked tool — acceptEdits would re-deny Bash); inline harnesses
             // (opencode) reply once/reject keyed off `approve`. Deny denies either way.
             <div className="prompt-actions flex items-center justify-end gap-2 pt-0.5">
+              {onComputer && (
+                <span className="prompt-on-computer me-auto text-sm text-subtext">
+                  {m.chat_panel_approve_on_computer()}
+                </span>
+              )}
               <Button
                 size="small"
                 variant="ghost"
@@ -2758,13 +2798,15 @@ function PromptCard({
               >
                 {m.chat_panel_deny()}
               </Button>
-              <Button
-                size="small"
-                variant="primary"
-                onClick={() => respond({ approve: true })}
-              >
-                {m.chat_panel_allow()}
-              </Button>
+              {!onComputer && (
+                <Button
+                  size="small"
+                  variant="primary"
+                  onClick={() => respond({ approve: true })}
+                >
+                  {m.chat_panel_allow()}
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -2895,7 +2937,8 @@ function ForkControls({
   nextId?: string;
   onSelect: (leafId: string) => void;
   pagerDisabled: boolean;
-  onEdit: () => void;
+  /** Absent where this connection can't fork. */
+  onEdit?: () => void;
   editDisabled: boolean;
 }) {
   const many = count > 1;
@@ -2938,14 +2981,14 @@ function ForkControls({
           <Copy size={13} />
         </IconButton>
       </div>
-      <IconButton size="small"
+      {onEdit && <IconButton size="small"
         title={m.chat_panel_edit_and_re_send()}
         aria-label={m.chat_panel_edit_and_re_send()}
         disabled={editDisabled}
         onClick={onEdit}
       >
         <Pencil size={13} />
-      </IconButton>
+      </IconButton>}
     </div>
   );
 }
@@ -3006,8 +3049,8 @@ const Message = memo(function Message({
   /** Paging between forks is a read-only pointer move, so it stays available
    * when editing does not (an unavailable harness still has branches to read). */
   branchDisabled: boolean;
-  onFork: (messageId: string, text: string) => void;
-  onSelectFork: (leafId: string) => void;
+  onFork?: (messageId: string, text: string) => void;
+  onSelectFork?: (leafId: string) => void;
 }) {
   useLocale();
   // Editing re-asks as a new fork rather than rewriting history, so the original
@@ -3042,7 +3085,7 @@ const Message = memo(function Message({
         // nothing to show for it.
         if (!next || forkDisabled) return;
         setEditDraft(null);
-        onFork(message.id, next);
+        onFork?.(message.id, next);
       };
       return (
         <div className="msg-user-group ms-auto self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
@@ -3116,9 +3159,9 @@ const Message = memo(function Message({
             index={forkIndex}
             prevId={forkPrevId}
             nextId={forkNextId}
-            onSelect={onSelectFork}
-            pagerDisabled={branchDisabled}
-            onEdit={() => setEditDraft(text)}
+            onSelect={onSelectFork ?? (() => {})}
+            pagerDisabled={branchDisabled || !onSelectFork}
+            onEdit={onFork ? () => setEditDraft(text) : undefined}
             editDisabled={forkDisabled}
           />
         )}
@@ -3735,8 +3778,9 @@ const Transcript = memo(function Transcript({
   allMessages: ChatMessage[];
   /** False greys out the edit control (busy turn, harness not ready). */
   canFork: boolean;
-  onFork: (messageId: string, text: string) => void;
-  onSelectFork: (leafId: string) => void;
+  /** Absent where this connection can't fork or switch branches. */
+  onFork?: (messageId: string, text: string) => void;
+  onSelectFork?: (leafId: string) => void;
   busy: boolean;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
@@ -3905,12 +3949,6 @@ const Transcript = memo(function Transcript({
 
 // --- session rail ------------------------------------------------------------
 
-type SessionFilter = "active" | "archived" | "all";
-
-/** Whether the rail's current filter shows a session in this archived state. */
-const matchesFilter = (filter: SessionFilter, archived: boolean) =>
-  filter === "all" ? true : filter === "archived" ? archived : !archived;
-
 /** Whether an event target sits inside the side-chat pane. */
 function inSideChat(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest("[data-side-chat]") !== null;
@@ -4036,6 +4074,7 @@ function SessionRow({
   onRename,
   onSetArchived,
   onDelete,
+  editable = true,
 }: {
   session: ChatSession;
   active: boolean;
@@ -4051,6 +4090,8 @@ function SessionRow({
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
+  /** False where this connection can't rename, archive or delete sessions. */
+  editable?: boolean;
 }) {
   const { open, setOpen, ref } = usePopover();
   const title = session.title?.trim() || "Untitled";
@@ -4151,7 +4192,7 @@ function SessionRow({
           unread && <span className="unread-dot" />
         )}
       </span>
-      <button
+      {editable && <button
         className="session-menu-btn"
         title={m.chat_panel_session_options()}
         aria-label={m.chat_panel_session_options()}
@@ -4161,7 +4202,7 @@ function SessionRow({
         }}
       >
         <MoreHorizontal size={14} />
-      </button>
+      </button>}
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <MenuItem
@@ -4267,6 +4308,8 @@ export function ChatPanel({
   preferredAutonomy,
   onPreferredAutonomyChange,
   embedded = false,
+  bare = false,
+  composerChips,
   onOpenSideChat,
   children,
 }: {
@@ -4337,6 +4380,12 @@ export function ChatPanel({
   /** A second instance hosting a side chat in the right pane: no rail, and
    * global shortcuts act on it only while focus is inside it. */
   embedded?: boolean;
+  /** Hosted by a shell that draws its own top bar and session navigation
+   * (MobileShell): no rail, reopen button, or session header. */
+  bare?: boolean;
+  /** Leading controls in the composer's action row (the Mobile layout's
+   * new-session page puts its project chip here). */
+  composerChips?: React.ReactNode;
   /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
   onOpenSideChat?: (parentSessionId: string, question: string) => void;
   /** Middle-pane content when a settings section is active. */
@@ -4353,24 +4402,21 @@ export function ChatPanel({
   const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
   const navigate = useNavigate();
+  // What this connection may do (Tunnel access hides most writes).
+  const caps = useMemo(() => capabilities(runtime), [runtime]);
+  const hiddenCommands = useMemo(() => hiddenComposerCommands(caps), [caps]);
+  // The Mobile layout's composer (bare = hosted by MobileShell): image-only
+  // attachments, no `!` shell, and bottom sheets for model and modes.
+  const mobile = bare;
+  const attachmentKinds = mobile ? "images" : "imagesAndPdf";
   const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
   const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
   const [sidebarGrouping, setSidebarGrouping] = useState<"projects" | "list">(() => {
     try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
     catch { return "projects"; }
   });
-  const [pinnedProjects, setPinnedProjects] = useState<string[]>(() => {
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-pinned-projects") ?? "[]");
-      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
-    } catch { return []; }
-  });
-  const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => {
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-collapsed-projects") ?? "[]");
-      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
-    } catch { return []; }
-  });
+  const [pinnedProjects, setPinnedProjects] = useState(() => readSidebarIds("sidebar-pinned-projects"));
+  const [collapsedProjects, setCollapsedProjects] = useState(() => readSidebarIds("sidebar-collapsed-projects"));
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
@@ -4387,7 +4433,7 @@ export function ChatPanel({
     return () => observer.disconnect();
   }, [railOpen, embedded, mainView]);
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
-  const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
+  const sortedProjects = sortSidebarProjects(sidebarProjects, pinnedProjects, recentActivity);
   const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
   const currentProject = sidebarProjects.find((project) => project.id === projectId);
@@ -4611,7 +4657,7 @@ export function ChatPanel({
     setAttachError(null);
     let total = attachments.reduce((n, a) => n + a.size, 0);
     for (const file of files) {
-      if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
+      if (!acceptsAttachment(file.type, attachmentKinds)) continue;
       if (file.size > MAX_BYTES) {
         setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
         continue;
@@ -4651,8 +4697,7 @@ export function ChatPanel({
     const files = Array.from(e.clipboardData.items)
       .filter(
         (item) =>
-          item.kind === "file" &&
-          (item.type.startsWith("image/") || item.type === "application/pdf"),
+          item.kind === "file" && acceptsAttachment(item.type, attachmentKinds),
       )
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
@@ -4690,13 +4735,20 @@ export function ChatPanel({
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
   const opts = activeHarness?.options;
+  // Over Tunnel access the picker stops at the session's current mode (or,
+  // before it exists, the mode chosen on the computer for this harness).
+  const permissionCeiling = openSession
+    ? openSession.permissionMode ?? opts?.defaultPermissionMode
+    : preferredAgent?.harness === rawSelection?.harness ? preferredAgent?.permissionMode : null;
+  const permission = permissionPicker(caps, opts?.permissionModes ?? [], permissionCeiling, opts?.defaultPermissionMode);
   const commands = useMemo(
-    () => commandsForHarness(skills, opts?.planActivation),
-    [skills, opts?.planActivation],
+    () => commandsForHarness(skills, opts?.planActivation, hiddenCommands),
+    [skills, opts?.planActivation, hiddenCommands],
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
-  const shellCommand = bashCommand(draft);
+  // Neither the Mobile layout nor Tunnel access has the shell.
+  const shellCommand = mobile || !caps.shell ? null : bashCommand(draft);
   const bashMode = shellCommand !== null;
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
@@ -5251,6 +5303,11 @@ export function ChatPanel({
   }, [state.busySessions, state.messagesBySession]);
   const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
   const activeSession = openSession;
+  const promptPolicy = useMemo<PromptPolicy>(() => ({
+    approveOnComputer: (prompt) =>
+      approveOnComputer(caps, activeSession?.harness, activeSession?.permissionMode, prompt),
+    planResumeModes: caps.planResumeModes,
+  }), [caps, activeSession?.harness, activeSession?.permissionMode]);
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
@@ -5473,7 +5530,7 @@ export function ChatPanel({
     // skill and supplies this exact message as their shared request context.
     const originalText = draft.trim();
     const composerCommand = !pendingQuestion
-      ? parseComposerCommand(originalText, opts?.planActivation)
+      ? parseComposerCommand(originalText, opts?.planActivation, hiddenCommands)
       : null;
     if (composerCommand && composerCommand.name !== "plan") {
       setDraft(takesArgument(composerCommand.name) ? "" : composerCommand.prompt);
@@ -6159,9 +6216,7 @@ export function ChatPanel({
   if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
     const query = projectSessionsQueries[index];
     const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
-    const matching = projectSessions
-      .filter((session) => !session.sideParentSessionId && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const matching = sidebarProjectSessions(projectSessions, sessionFilter, activeId);
     const chatLimit = chatLimits[project.id] ?? 6;
     let visible = matching.slice(0, chatLimit);
     const selected = matching.find((session) => session.id === activeId);
@@ -6232,14 +6287,14 @@ export function ChatPanel({
           <Plus size={15} />
           {m.chat_panel_new_chat()}
         </button>
-        <button
+        {caps.settings && <button
           className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={15} />
           {m.chat_panel_customize()}
-        </button>
-        {SETTINGS_NAV.map((item) => (
+        </button>}
+        {caps.settings && SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
             className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
@@ -6256,7 +6311,7 @@ export function ChatPanel({
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
         <div className="rail-section-actions flex items-center gap-0.5">
-          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+          {onNewProject && caps.projectCreate && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={15} className="text-subtext" />
             </IconButton>
@@ -6298,17 +6353,18 @@ export function ChatPanel({
                       collapsed={row.collapsed}
                       busy={row.busy}
                       onToggleCollapsed={() => {
-                        const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
+                        const next = toggleId(collapsedProjects, project.id);
                         setCollapsedProjects(next);
-                        try { localStorage.setItem("sidebar-collapsed-projects", JSON.stringify(next)); } catch {}
+                        writeSidebarIds("sidebar-collapsed-projects", next);
                       }}
                       pinned={pinnedProjects.includes(project.id)}
                       onPin={() => {
-                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+                        const next = toggleId(pinnedProjects, project.id);
                         setPinnedProjects(next);
-                        try { localStorage.setItem("sidebar-pinned-projects", JSON.stringify(next)); } catch {}
+                        writeSidebarIds("sidebar-pinned-projects", next);
                       }}
                       onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
+                      manageable={caps.projectDelete}
                       onNewChat={() => {
                         if (project.id === projectId) startProjectTask();
                         else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
@@ -6348,6 +6404,7 @@ export function ChatPanel({
                       onRename={(title) => rename(s, title)}
                       onSetArchived={(archived) => setArchived(s, archived)}
                       onDelete={() => void removeSession(s)}
+                      editable={caps.editSession}
                     />
                   </div>
                 ) : row.kind === "more" ? (
@@ -6401,7 +6458,7 @@ export function ChatPanel({
   );
 
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
-  const railReopen = !railOpen && !embedded && (
+  const railReopen = !railOpen && !embedded && !bare && (
     <IconButton
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
@@ -6430,10 +6487,10 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
+      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded || bare ? "" : "mt-5"}`}>
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
+        {!bare && <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -6462,7 +6519,7 @@ export function ChatPanel({
             </IconButton>
           )}
           </div>
-        </div>
+        </div>}
 
         {contentError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
@@ -6570,6 +6627,7 @@ export function ChatPanel({
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <PromptPolicyContext.Provider value={promptPolicy}>
                 <Transcript
                   key={activeId}
                   scrollRef={threadRef}
@@ -6579,8 +6637,8 @@ export function ChatPanel({
                   messages={messages}
                   allMessages={allMessages}
                   canFork={canFork}
-                  onFork={forkTurn}
-                  onSelectFork={selectBranch}
+                  onFork={caps.fork ? forkTurn : undefined}
+                  onSelectFork={caps.fork ? selectBranch : undefined}
                   busy={busy}
                   onOpenFile={openFileInSession}
                   onOpenRun={onOpenRun}
@@ -6596,6 +6654,7 @@ export function ChatPanel({
                   skills={transcriptSkills}
                   minimapHost={minimapHost}
                 />
+                </PromptPolicyContext.Provider>
               </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
@@ -6660,7 +6719,7 @@ export function ChatPanel({
               agentLabel={
                 activeSession ? HARNESS_LABELS[activeSession.harness] : m.chat_the_agent()
               }
-              showResumeModes={activeSession?.harness === "claude-code"}
+              showResumeModes={activeSession?.harness === "claude-code" && caps.planResumeModes}
               onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
               onApprove={(resumeMode) =>
                 respond({
@@ -6701,7 +6760,7 @@ export function ChatPanel({
                         : m.chat_queued()}
                     </span>
                   )}
-                  {q.dispatchState === "blocked" ? (
+                  {!caps.editQueue ? null : q.dispatchState === "blocked" ? (
                     <>
                       <button
                         onClick={() => void retryQueued(q.id)}
@@ -6798,7 +6857,7 @@ export function ChatPanel({
               activity={projectActivity}
               projectId={projectId}
               projectName={projectName}
-              onNewProject={onNewProject}
+              onNewProject={caps.projectCreate ? onNewProject : undefined}
               onSelect={(id) => {
                 if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
@@ -6896,25 +6955,19 @@ export function ChatPanel({
                 ref={composerRef}
                 aria-describedby={demoHintVisible ? demoHintId : undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 bg-transparent"
+                // 16px on phones: iOS zooms into smaller focused inputs.
+                className={`relative z-1 bg-transparent ${mobile ? "text-base" : ""}`}
                 value={draft}
-                placeholder={
-                  // A pending question card owns typed text (see send()); say so.
-                  // While a steerable turn runs, Enter goes to that turn, so name
-                  // the gesture and its queue chord — the send button is a Stop
-                  // button for the whole busy stretch.
-                  // Otherwise follow `composerSelection` so the name tracks the
-                  // picker for a new session and the open session once one exists.
-                  pendingQuestion
-                    ? m.chat_type_custom_answer()
-                    : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
-                          : m.chat_harness_unavailable({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
-                        : m.chat_ask_agent_placeholder()
-                }
+                // The send button is a Stop button for the whole steering stretch.
+                // The harness follows `composerSelection` so the name tracks the
+                // picker for a new session and the open session once one exists.
+                placeholder={composerPlaceholder({
+                  answeringQuestion: Boolean(pendingQuestion),
+                  steer: steering && activeHarness ? { harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) } : null,
+                  harness: composerSelection ? ltr(HARNESS_LABELS[composerSelection.harness]) : null,
+                  harnessReady: Boolean(activeHarness?.agentReady),
+                  shell: !mobile && caps.shell,
+                })}
                 rows={2}
                 onPaste={onComposerPaste}
                 onDragOver={(e) => {
@@ -6934,7 +6987,7 @@ export function ChatPanel({
                   // answer is a note, never a command) and not mid-IME-composition,
                   // where the text can transiently look complete.
                   const completedCommand =
-                    cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
+                    cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && (mobile || bashCommand(v) === null)
                       ? slashCommandContext(v, cursor - 1)
                       : null;
                   const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
@@ -7009,7 +7062,8 @@ export function ChatPanel({
               />
             </div>
             <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
-              <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
+              {composerChips}
+              {!mobile && <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
                 <IconButton
                   type="button"
                   className="composer-bare"
@@ -7027,11 +7081,11 @@ export function ChatPanel({
                     <LitSourcesList />
                   </div>
                 )}
-              </div>
+              </div>}
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
+                accept={attachmentAccept(attachmentKinds)}
                 multiple
                 hidden
                 onChange={(e) => {
@@ -7042,13 +7096,13 @@ export function ChatPanel({
               <IconButton
                 type="button"
                 className="composer-attach"
-                title={m.chat_panel_attach_a_pdf_or_image()}
-                aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                title={mobile ? m.mobile_attach_image() : m.chat_panel_attach_a_pdf_or_image()}
+                aria-label={mobile ? m.mobile_attach_image() : m.chat_panel_attach_a_pdf_or_image()}
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Paperclip size={16} />
               </IconButton>
-              {sessionGoal && (
+              {sessionGoal && caps.editSession && (
                 <Button
                   type="button"
                   variant="ghost"
@@ -7103,24 +7157,50 @@ export function ChatPanel({
               {/* The model picker reflects the open session (harness locked once it
                 exists); the global default only applies before the first
                 message. */}
-              <div className="flex min-w-0 items-center">
+              {mobile ? (
+                <>
+                  <MobileModelChip value={composerSelection} onSelect={selectModel} lockHarness={!!openSession} openRequest={modelPickerRequest} />
+                  <MobileComposerMenu
+                    plan={activeHarness?.agentReady && (composerSelection?.harness === "claude-code" || opts?.planActivation === "command")
+                      ? { active: planActive, onToggle: () => void togglePlanMode() }
+                      : null}
+                    groups={activeHarness?.agentReady ? [
+                      {
+                        title: m.model_picker_mode(),
+                        // Plan has its own switch above.
+                        choices: permission.choices.filter((choice) => composerSelection?.harness !== "claude-code" || choice.id !== "plan"),
+                        effectiveId: composerSelection?.permissionMode ?? permission.defaultId ?? permission.choices[0]?.id,
+                        defaultId: permission.defaultId,
+                        onSelect: setPermissionMode,
+                      },
+                      {
+                        title: composerSelection?.harness === "opencode" ? m.model_picker_variant() : m.model_picker_effort(),
+                        choices: reasoning.choices,
+                        effectiveId: composerSelection?.reasoningLevel ?? reasoning.defaultId ?? reasoning.choices[0]?.id,
+                        defaultId: reasoning.defaultId,
+                        onSelect: setReasoningLevel,
+                      },
+                    ] : []}
+                  />
+                </>
+              ) : <div className="flex min-w-0 items-center">
                 <ModelPicker
                   value={composerSelection}
                   onSelect={selectModel}
-                  onOpenSettings={() => onSelectMainView("harnesses")}
-                  permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
-                  defaultPermissionId={opts?.defaultPermissionMode ?? null}
+                  onOpenSettings={caps.settings ? () => onSelectMainView("harnesses") : undefined}
+                  permissionChoices={activeHarness?.agentReady ? permission.choices : []}
+                  defaultPermissionId={permission.defaultId}
                   onSelectPermission={setPermissionMode}
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? preferredAutonomy}
-                  onSelectAutonomy={setAutonomy}
+                  onSelectAutonomy={caps.editSession ? setAutonomy : undefined}
                   lockHarness={!!openSession}
                   openRequest={modelPickerRequest}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
-              </div>
+              </div>}
               {busy && !pendingQuestion ? (
                 // Stop whenever the turn is busy and typed text has nowhere to
                 // go — actively streaming, or held on a plan/permission card

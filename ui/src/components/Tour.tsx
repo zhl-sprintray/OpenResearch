@@ -10,7 +10,8 @@ export function DemoWelcomeModal({
   onCreateProject,
 }: {
   onClose: (choice: "explore_demo" | "dismiss") => Promise<void>;
-  onCreateProject: () => Promise<void>;
+  /** Omitted where projects can't be created (Tunnel access). */
+  onCreateProject?: () => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -128,12 +129,14 @@ export function DemoWelcomeModal({
         </div>
         {error && <p className="mt-3 mb-0 text-sm text-accent-red">{error}</p>}
         <div className="mt-6 flex flex-wrap items-center justify-end gap-2.5">
-          <Button
-            onClick={() => run(onCreateProject)}
-            disabled={saving}
-          >
-            {m.tour_create_a_new_project()}
-          </Button>
+          {onCreateProject && (
+            <Button
+              onClick={() => run(onCreateProject)}
+              disabled={saving}
+            >
+              {m.tour_create_a_new_project()}
+            </Button>
+          )}
           <Button variant="primary"
             onClick={() => run(() => onClose("explore_demo"))}
             disabled={saving}

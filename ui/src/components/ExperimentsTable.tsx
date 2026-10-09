@@ -26,8 +26,9 @@ export function ExperimentsTable({
   emptyHint?: string;
   onOpen: (experiment: Experiment, intent: TabOpenIntent) => void;
   onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
-  onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
-  onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  /** Absent where this connection can't browse code or archive experiments. */
+  onOpenCode?: (experimentId: string, intent: TabOpenIntent) => void;
+  onArchive?: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
@@ -158,7 +159,7 @@ export function ExperimentsTable({
                   <Terminal size={15} />
                   {m.experiments_table_logs()}
                 </Button>
-                <Button
+                {onOpenCode && <Button
                   size="small"
                   title={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
@@ -167,7 +168,7 @@ export function ExperimentsTable({
                 >
                   <FolderTree size={15} />
                   {m.experiments_table_code()}
-                </Button>
+                </Button>}
                 {liveRun && (
                   <Button
                     size="small"
@@ -180,12 +181,12 @@ export function ExperimentsTable({
                     {cancelling ? m.common_stopping() : m.common_stop()}
                   </Button>
                 )}
-                <ArchiveMenu
+                {onArchive && <ArchiveMenu
                   id={experiment.id}
                   name={experiment.title || experiment.slug}
                   actions={archiveActions.get(experiment.id)!}
                   onArchive={onArchive}
-                />
+                />}
               </div>
             </div>
           );
