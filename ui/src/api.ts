@@ -1057,8 +1057,10 @@ export interface RemoteSessionInfo {
   canStartNewHost: boolean;
 }
 
+/** `tunnelAccess` is true when this request came over Tunnel access; the UI
+ * hides what the Tunnel allowlist refuses (the server enforces it anyway). */
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
+  | { kind: "local"; version: string; tunnelAccess?: boolean }
   | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);

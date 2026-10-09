@@ -24,7 +24,7 @@ use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, MethodRouter};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use base64::Engine as _;
 use futures::Stream;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -6394,8 +6394,14 @@ async fn disconnect_remote_session(
     Ok(Json(json!(state.remote_sessions.disconnect(&id).await?)))
 }
 
-async fn local_runtime() -> Json<Value> {
-    Json(json!({ "kind": "local", "version": env!("CARGO_PKG_VERSION") }))
+/// `tunnelAccess` tells the UI to hide what the Tunnel allowlist refuses; the
+/// server enforces it regardless.
+async fn local_runtime(tunnel: Option<Extension<tunnel::TunnelAccess>>) -> Json<Value> {
+    Json(json!({
+        "kind": "local",
+        "version": env!("CARGO_PKG_VERSION"),
+        "tunnelAccess": tunnel.is_some(),
+    }))
 }
 
 async fn list_local_models() -> ApiResult {
@@ -7228,12 +7234,20 @@ struct CreateChatSessionReq {
 
 async fn create_chat_session(
     State(state): State<AppState>,
-    Json(req): Json<CreateChatSessionReq>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
+    Json(mut req): Json<CreateChatSessionReq>,
 ) -> ApiResult {
-    reject_if_moving(&state)?;
     if !local::harness::is_chat_harness(&req.harness) {
         return Err(bad_request(format!("unknown harness: {}", req.harness)));
     }
+    if tunnel_access.is_some() {
+        let requested = req
+            .permission_mode
+            .take()
+            .filter(|mode| !mode.trim().is_empty());
+        req.permission_mode = tunnel::limit_new_session(&state, &req.harness, requested)?;
+    }
+    reject_if_moving(&state)?;
     let _admission = state
         .project_lifecycle
         .admit(&req.project_id)
@@ -7404,9 +7418,25 @@ struct UpdateChatSessionReq {
 
 async fn update_chat_session(
     State(state): State<AppState>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateChatSessionReq>,
 ) -> ApiResult {
+    if tunnel_access.is_some() {
+        // Over Tunnel access a session's modes may only get stricter, and
+        // nothing else about it changes.
+        if req.title.is_some()
+            || req.archived.is_some()
+            || req.goal.is_some()
+            || req.autonomy.is_some()
+        {
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "This action is unavailable over Tunnel access.".into(),
+            ));
+        }
+        tunnel::limit_session_change(&state, &id, req.permission_mode.as_deref(), req.plan_mode)?;
+    }
     reject_if_moving(&state)?;
     let session = if let Some(title) = req.title {
         let title = title.trim();
@@ -7572,9 +7602,13 @@ async fn compact_chat_session(State(state): State<AppState>, Path(id): Path<Stri
 
 async fn send_chat_message(
     State(state): State<AppState>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
     Path(id): Path<String>,
     Json(req): Json<SendChatReq>,
 ) -> ApiResult {
+    if tunnel_access.is_some() {
+        tunnel::limit_session_change(&state, &id, req.permission_mode.as_deref(), req.plan_mode)?;
+    }
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let store = Store::open()?;
@@ -7882,9 +7916,13 @@ fn default_true() -> bool {
 /// Answer an interactive prompt (plan / permission / question) on a session.
 async fn respond_chat(
     State(state): State<AppState>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
     Path(id): Path<String>,
     Json(req): Json<RespondReq>,
 ) -> ApiResult {
+    if tunnel_access.is_some() {
+        tunnel::limit_resume_mode(&state, &id, req.resume_mode.as_deref())?;
+    }
     reject_if_stopping(&state)?;
     state
         .chat
