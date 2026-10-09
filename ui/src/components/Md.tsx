@@ -28,6 +28,10 @@ import { chatImageTarget, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from
 
 const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
 
+/** Which cited file paths this connection can open; `null` means all. Over
+ * Tunnel access repo files are desktop-only, so their chips render as text. */
+export const FileOpenableContext = createContext<((path: string) => boolean) | null>(null);
+
 export function ChatImageScope({ projectId, sessionId, children }: {
   projectId: string;
   sessionId?: string | null;
@@ -286,6 +290,10 @@ function FileChip({
 }) {
   const name = path.split("/").pop() || path;
   const label = line != null ? `${name}:${line}` : name;
+  const openable = useContext(FileOpenableContext);
+  // A file this connection can't open (repo files over Tunnel access) reads
+  // as plain text rather than a chip that does nothing.
+  if (openable && !openable(path)) return <code>{label}</code>;
   return (
     <button
       className="file-chip"

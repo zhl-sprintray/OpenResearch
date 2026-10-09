@@ -119,18 +119,18 @@ import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { DesktopAppBanner } from "./components/DesktopAppBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { TunnelAccessBadge } from "./components/TunnelAccessBadge";
-import { capabilities } from "./capabilities";
+import { capabilities, fileReadable } from "./capabilities";
 import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { archiveActionsByExperiment } from "./components/ArchiveMenu";
-import { Md } from "./components/Md";
+import { FileOpenableContext, Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
-import { CodeTabBody, TabBody } from "./components/layout/TabBody";
+import { CodeTabBody, CodeTabNote, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
 
 const EMPTY_STATE_CLASS_NAME = [
@@ -1101,7 +1101,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       );
       if (!tab) return null;
       // Without code-file access only the artifacts store can answer.
-      if (!caps.codeFiles && tab.source !== "artifacts") return null;
+      if (!fileReadable(caps, tab)) return null;
       // A cited experiment pins the file to that node's committed branch, so the
       // tab shows (and labels) the version behind the claim. Agents cite the
       // short id (`orx` prints an 8-char prefix), so match the full id or prefix.
@@ -1126,7 +1126,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       }
       return tab;
     },
-    [projects, projectId, caps.codeFiles],
+    [projects, projectId, caps],
+  );
+  // Over Tunnel access, cited files this connection can't open render as text.
+  const fileOpenable = useMemo(
+    () => (caps.codeFiles ? null : (path: string) => resolveFileTab(path) !== null),
+    [caps.codeFiles, resolveFileTab],
   );
 
   const openFileTab = useCallback(
@@ -1732,6 +1737,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   );
 
   return (
+    <FileOpenableContext.Provider value={fileOpenable}>
     <div className="app flex flex-col h-full">
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && caps.updates && <UpdateBanner status={updateStatus} />}
@@ -2079,6 +2085,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   </div>
                 )}
               </TabBody>
+            ) : fileTab && !fileReadable(caps, fileTab) ? (
+              // A restored repo file over Tunnel access: say where it opens
+              // instead of failing to load it.
+              <TabBody>
+                <CodeTabNote>
+                  <strong className="block font-medium text-text">{m.mobile_desktop_only_title()}</strong>
+                  {m.mobile_desktop_only_body()}
+                </CodeTabNote>
+              </TabBody>
             ) : fileTab ? (
               <TabBody>
                 {projectId && (
@@ -2333,5 +2348,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         />
       )}
     </div>
+    </FileOpenableContext.Provider>
   );
 }

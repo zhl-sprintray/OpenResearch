@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { approveOnComputer, capabilities, hiddenComposerCommands, permissionPicker } from "../src/capabilities.ts";
+import {
+  approveOnComputer,
+  capabilities,
+  codeTabView,
+  fileReadable,
+  hiddenComposerCommands,
+  permissionPicker,
+} from "../src/capabilities.ts";
 
 const local = { kind: "local", version: "1.0.0" };
 const tunnel = { kind: "local", version: "1.0.0", tunnelAccess: true };
@@ -118,4 +125,19 @@ test("locally the mode picker lists every mode with the harness default", () => 
   const picker = permissionPicker(capabilities(local), claudeModes, "manual", "auto");
   assert.deepEqual(ids(picker), ids({ choices: claudeModes }));
   assert.equal(picker.defaultId, "auto");
+});
+
+test("over Tunnel access only artifact files open; repo and absolute files are desktop-only", () => {
+  const tunnelCaps = capabilities(tunnel);
+  assert.equal(fileReadable(tunnelCaps, { source: "artifacts" }), true);
+  for (const source of [undefined, "repo", "abs"]) {
+    assert.equal(fileReadable(tunnelCaps, { source }), false, String(source));
+    assert.equal(fileReadable(capabilities(local), { source }), true, String(source));
+  }
+});
+
+test("over Tunnel access an experiment's code shows its diff, never the file browser", () => {
+  assert.equal(codeTabView(capabilities(tunnel), "files"), "changes");
+  assert.equal(codeTabView(capabilities(tunnel), "changes"), "changes");
+  assert.equal(codeTabView(capabilities(local), "files"), "files");
 });

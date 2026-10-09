@@ -100,6 +100,18 @@ export function permissionPicker<T extends { id: string }>(
   };
 }
 
+/** Whether a file tab or chip can load here. Over Tunnel access only the
+ * artifacts store answers; repo and absolute-path files are desktop-only. */
+export function fileReadable(caps: Capabilities, file: { source?: string | null }): boolean {
+  return caps.codeFiles || file.source === "artifacts";
+}
+
+/** The view an experiment's Code tab shows. Over Tunnel access its committed
+ * diff is readable but the branch's file browser is not. */
+export function codeTabView<V extends "files" | "changes">(caps: Capabilities, view: V): V | "changes" {
+  return caps.codeFiles ? view : "changes";
+}
+
 /** Whether this permission card must be approved on the computer: an
  * end-turn Claude approval (no live bridge request to answer) in a session
  * not already bypassing permissions. Denying it stays possible. */

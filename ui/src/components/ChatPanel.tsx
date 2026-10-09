@@ -169,7 +169,7 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { ChatImageScope, Md } from "./Md";
+import { ChatImageScope, FileOpenableContext, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
@@ -1972,6 +1972,7 @@ function ToolActivityLabel({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
+  const fileOpenable = useContext(FileOpenableContext);
   if (activity.searchPattern) {
     return activity.label;
   }
@@ -1988,7 +1989,12 @@ function ToolActivityLabel({
       </a>
     );
   }
-  if (activity.filePath && activity.labelTarget && onOpenFile) {
+  if (
+    activity.filePath &&
+    activity.labelTarget &&
+    onOpenFile &&
+    (!fileOpenable || fileOpenable(activity.filePath))
+  ) {
     const filePath = activity.filePath;
     return (
       <span
