@@ -3101,34 +3101,34 @@ impl Store {
     }
 
     /// Paired devices still within their sliding expiry, most recently paired
-    /// first. Expired devices are pruned on the way.
+    /// first. Expired rows stay until `prune_tunnel_devices`.
     pub fn list_tunnel_devices(&self, now_ms: i64) -> Result<Vec<TunnelDevice>> {
-        self.prune_tunnel_devices(now_ms)?;
         let mut stmt = self.conn.prepare(
             "SELECT id, name, paired_at, last_seen_at FROM tunnel_devices
+             WHERE last_seen_at >= ?1
              ORDER BY paired_at DESC, id",
         )?;
         let devices = stmt
-            .query_map([], tunnel_device_row)?
+            .query_map(params![now_ms - TUNNEL_DEVICE_TTL_MS], tunnel_device_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(devices)
     }
 
     /// The live device whose cookie token hashes to `token_hash`. Each use
     /// slides its 30-day expiry; `last_seen_at` is rewritten at most once a
-    /// minute so every request does not cost a write.
+    /// minute so every request does not cost a write. An expired device
+    /// authenticates nothing, pruned or not.
     pub fn authenticate_tunnel_device(
         &self,
         token_hash: &str,
         now_ms: i64,
     ) -> Result<Option<TunnelDevice>> {
-        self.prune_tunnel_devices(now_ms)?;
         let device = self
             .conn
             .query_row(
                 "SELECT id, name, paired_at, last_seen_at FROM tunnel_devices
-                 WHERE token_hash = ?1",
-                params![token_hash],
+                 WHERE token_hash = ?1 AND last_seen_at >= ?2",
+                params![token_hash, now_ms - TUNNEL_DEVICE_TTL_MS],
                 tunnel_device_row,
             )
             .optional()?;
@@ -3175,12 +3175,16 @@ impl Store {
         Ok(self.conn.execute("DELETE FROM tunnel_devices", [])?)
     }
 
-    fn prune_tunnel_devices(&self, now_ms: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM tunnel_devices WHERE last_seen_at < ?1",
-            params![now_ms - TUNNEL_DEVICE_TTL_MS],
-        )?;
-        Ok(())
+    /// Deletes devices past their sliding expiry and returns their ids, so
+    /// whatever they still hold open can be ended too.
+    pub fn prune_tunnel_devices(&self, now_ms: i64) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("DELETE FROM tunnel_devices WHERE last_seen_at < ?1 RETURNING id")?;
+        let pruned = stmt
+            .query_map(params![now_ms - TUNNEL_DEVICE_TTL_MS], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(pruned)
     }
 
     pub fn upsert_ssh_host_test(&self, t: &SshHostTest) -> Result<()> {
@@ -3672,11 +3676,20 @@ mod tests {
             .authenticate_tunnel_device("hash-1", later + 29 * day)
             .unwrap()
             .is_some());
-        // d2 was never used again: past 30 days it is gone.
+        // d2 was never used again: past 30 days it no longer authenticates,
+        // and pruning removes it, naming it so its sessions can be ended.
         assert!(store
             .authenticate_tunnel_device("hash-2", 2_000 + 30 * day + 1)
             .unwrap()
             .is_none());
+        assert_eq!(
+            store.prune_tunnel_devices(2_000 + 30 * day + 1).unwrap(),
+            ["d2"]
+        );
+        assert!(store
+            .prune_tunnel_devices(2_000 + 30 * day + 1)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             store
                 .list_tunnel_devices(later)

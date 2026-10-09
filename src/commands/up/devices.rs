@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-#[cfg(test)]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +21,7 @@ use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::{bad_request, not_found, ApiError, ApiResult, AppState, UiDist};
-use crate::error::Result;
+use crate::error::{anyhow, Result};
 use crate::store::{now_ms, Store, TunnelDevice};
 
 /// The pairing page a pairing QR code opens; the code rides in the `#`
@@ -48,11 +47,19 @@ pub(super) struct TunnelDevices {
     /// only: a restart invalidates every outstanding code.
     codes: Mutex<HashMap<String, i64>>,
     /// One token per device seen since start, cancelled when the device is
-    /// revoked so its open streams close.
+    /// revoked or pruned so its open streams close.
     sessions: Mutex<HashMap<String, CancellationToken>>,
+    /// The handle every Tunnel request's device check reuses, opened once
+    /// per data dir rather than per request.
+    shared_store: Mutex<Option<(PathBuf, Store)>>,
+    /// When expired devices were last pruned (on `now`'s clock).
+    last_prune_ms: AtomicI64,
     #[cfg(test)]
     clock_skew_ms: AtomicI64,
 }
+
+/// How often a device check also prunes expired devices.
+const PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 impl TunnelDevices {
     pub(super) fn new(store_dir: Option<PathBuf>) -> Self {
@@ -60,6 +67,8 @@ impl TunnelDevices {
             store_dir,
             codes: Mutex::default(),
             sessions: Mutex::default(),
+            shared_store: Mutex::default(),
+            last_prune_ms: AtomicI64::new(i64::MIN),
             #[cfg(test)]
             clock_skew_ms: AtomicI64::new(0),
         }
@@ -72,6 +81,22 @@ impl TunnelDevices {
             Some(dir) => Store::open_at(dir.clone()),
             None => Store::open(),
         }
+    }
+
+    /// Runs `f` on the shared handle, reopening it only when the data dir
+    /// moved. Blocking: call from a blocking thread.
+    fn with_shared_store<T>(&self, f: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+        let dir = self
+            .store_dir
+            .clone()
+            .unwrap_or_else(crate::store::data_dir);
+        let mut shared = self.shared_store.lock().unwrap();
+        let current = matches!(&*shared, Some((open, _)) if *open == dir);
+        if !current {
+            *shared = Some((dir, self.store()?));
+        }
+        let (_, store) = shared.as_ref().expect("opened above");
+        f(store)
     }
 
     fn now(&self) -> i64 {
@@ -104,14 +129,16 @@ impl TunnelDevices {
         expires.is_some_and(|expires| expires > now)
     }
 
-    /// The paired device presenting the cookie in `headers`, if any.
-    fn authenticate(&self, headers: &HeaderMap) -> Result<Option<DeviceSession>> {
-        let Some(token) = device_token(headers) else {
-            return Ok(None);
-        };
-        let lookup = self
-            .store()?
-            .authenticate_tunnel_device(&digest(token), self.now())?;
+    /// The paired device presenting `token`, if any. Blocking: call from a
+    /// blocking thread.
+    fn authenticate(&self, token: &str) -> Result<Option<DeviceSession>> {
+        let now = self.now();
+        if now.saturating_sub(self.last_prune_ms.load(Ordering::Relaxed)) >= PRUNE_INTERVAL_MS {
+            self.last_prune_ms.store(now, Ordering::Relaxed);
+            self.prune(now)?;
+        }
+        let lookup =
+            self.with_shared_store(|store| store.authenticate_tunnel_device(&digest(token), now))?;
         let Some(device) = lookup else {
             return Ok(None);
         };
@@ -120,13 +147,32 @@ impl TunnelDevices {
         // landed between the lookup and taking the token, the token taken here
         // is fresh, so check the row again rather than serve a stream nothing
         // will ever cancel.
-        if !self.store()?.tunnel_device_exists(&device.id)? {
+        if !self.with_shared_store(|store| store.tunnel_device_exists(&device.id))? {
             return Ok(None);
         }
         Ok(Some(DeviceSession {
             device_id: device.id,
             revoked,
         }))
+    }
+
+    /// Deletes expired devices and ends whatever they still hold open.
+    fn prune(&self, now: i64) -> Result<()> {
+        let pruned = self.with_shared_store(|store| store.prune_tunnel_devices(now))?;
+        let mut sessions = self.sessions.lock().unwrap();
+        for id in pruned {
+            if let Some(token) = sessions.remove(&id) {
+                token.cancel();
+            }
+        }
+        Ok(())
+    }
+
+    /// Live paired devices, pruning expired ones first. Blocking.
+    fn list(&self) -> Result<Vec<TunnelDevice>> {
+        let now = self.now();
+        self.prune(now)?;
+        self.with_shared_store(|store| store.list_tunnel_devices(now))
     }
 
     /// Pairs a device without the code dance and returns its `Cookie` header
@@ -204,7 +250,14 @@ pub(super) async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    match devices.authenticate(request.headers()) {
+    let token = device_token(request.headers()).map(str::to_owned);
+    let session = match token {
+        None => Ok(None),
+        Some(token) => tokio::task::spawn_blocking(move || devices.authenticate(&token))
+            .await
+            .unwrap_or_else(|error| Err(anyhow!("Device check failed: {error}"))),
+    };
+    match session {
         Ok(Some(session)) => {
             let revoked = session.revoked.clone();
             request.extensions_mut().insert(session);
@@ -388,8 +441,10 @@ pub(super) async fn mint_pairing_code(State(state): State<AppState>) -> Json<Val
 }
 
 pub(super) async fn list_devices(State(state): State<AppState>) -> ApiResult {
-    let devices = &state.tunnel_devices;
-    let list = devices.store()?.list_tunnel_devices(devices.now())?;
+    let devices = state.tunnel_devices.clone();
+    let list = tokio::task::spawn_blocking(move || devices.list())
+        .await
+        .map_err(|error| anyhow!("Listing devices failed: {error}"))??;
     Ok(Json(json!(list)))
 }
 
@@ -659,6 +714,55 @@ mod tests {
         assert_eq!(response.status(), 200);
         assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&kept)).await, 401);
         assert!(ports.devices().await.is_empty());
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    async fn open_events(ports: &Ports, cookie: &str) -> reqwest::Response {
+        let events = client()
+            .get(ports.tunnel("/api/events"))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(events.status(), 200);
+        events
+    }
+
+    async fn assert_ends(mut events: reqwest::Response) {
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Ok(Some(_)) = events.chunk().await {}
+        })
+        .await;
+        assert!(ended.is_ok(), "the event stream outlived its device");
+    }
+
+    #[tokio::test]
+    async fn listing_devices_ends_the_streams_of_expired_ones() {
+        let ports = Ports::open().await;
+        let cookie = ports.pair().await;
+        let events = open_events(&ports, &cookie).await;
+
+        ports.state.tunnel_devices.advance_clock(31 * DAY_MS);
+        assert!(ports.devices().await.is_empty());
+        assert_ends(events).await;
+        assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&cookie)).await, 401);
+    }
+
+    #[tokio::test]
+    async fn expired_devices_are_pruned_without_anyone_listing_them() {
+        let ports = Ports::open().await;
+        let expiring = ports.pair().await;
+        let active = ports.pair().await;
+        let events = open_events(&ports, &expiring).await;
+
+        let devices = &ports.state.tunnel_devices;
+        devices.advance_clock(29 * DAY_MS);
+        assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&active)).await, 403);
+        devices.advance_clock(2 * DAY_MS);
+        // Any device's request prunes, at most hourly.
+        assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&active)).await, 403);
+        assert_ends(events).await;
     }
 
     #[tokio::test]
