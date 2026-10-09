@@ -8152,6 +8152,7 @@ fn mime_for(path: &str) -> &'static str {
         Some("css") => "text/css",
         Some("svg") => "image/svg+xml",
         Some("json") | Some("map") => "application/json",
+        Some("webmanifest") => "application/manifest+json",
         Some("png") => "image/png",
         Some("ico") => "image/x-icon",
         Some("woff2") => "font/woff2",
@@ -8160,19 +8161,23 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
-fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
-    // index.html must revalidate every load or browsers heuristically cache it
-    // and keep loading a stale (hashed) bundle; the hashed assets themselves
-    // are immutable by name. favicon.svg is likewise served under a fixed name.
-    let cache = if path == "index.html" || path == "favicon.svg" {
+/// index.html must revalidate every load or browsers heuristically cache it
+/// and keep loading a stale (hashed) bundle; the hashed assets themselves are
+/// immutable by name. favicon.svg and the web app manifest are likewise served
+/// under fixed names.
+fn asset_cache_control(path: &str) -> &'static str {
+    if matches!(path, "index.html" | "favicon.svg" | "manifest.webmanifest") {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
-    };
+    }
+}
+
+fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     (
         [
             (header::CONTENT_TYPE, mime_for(path)),
-            (header::CACHE_CONTROL, cache),
+            (header::CACHE_CONTROL, asset_cache_control(path)),
         ],
         file.data.into_owned(),
     )
@@ -8199,6 +8204,20 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_app_manifest_is_typed_and_revalidated() {
+        assert_eq!(
+            mime_for("manifest.webmanifest"),
+            "application/manifest+json"
+        );
+        assert_eq!(asset_cache_control("manifest.webmanifest"), "no-cache");
+        assert_eq!(asset_cache_control("favicon.svg"), "no-cache");
+        assert_eq!(
+            asset_cache_control("assets/index-abc123.js"),
+            "public, max-age=31536000, immutable"
+        );
+    }
 
     /// An `AppState` like `run`'s, without a dashboard lock or background tasks.
     pub(super) fn test_state() -> AppState {
