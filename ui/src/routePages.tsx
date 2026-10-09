@@ -10,6 +10,7 @@ import { globalResumeLocation, projectResumeLocation } from "./routeResume";
 import { m } from "./paraglide/messages.js";
 import { Onboarding } from "./components/Onboarding";
 import { OfflineBanner } from "./components/OfflineBanner";
+import { TunnelAccessBadge } from "./components/TunnelAccessBadge";
 import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { DesktopAppBanner } from "./components/DesktopAppBanner";
@@ -81,7 +82,7 @@ export function ProjectsPage() {
 
   return (
     <div className="app flex flex-col h-full">
-      {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /></>}
+      {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /><TunnelAccessBadge /></>}
       <DesktopAppBanner />
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />

@@ -135,6 +135,23 @@ export const getTelemetryQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+/** Polled: the provider can drop and reconnect with no event announcing it.
+ *  Polling stops on an error (e.g. the 403 this original-port route answers
+ *  over Tunnel access). */
+export const getTunnelAccessQuery = () => queryOptions({
+  queryKey: workspaceKey("getTunnelAccess"),
+  queryFn: ({ signal }) => api.getTunnelAccess(signal),
+  staleTime: 5_000,
+  refetchInterval: (query) => (query.state.error ? false : 15_000),
+  retry: false,
+});
+
+export const listTunnelDevicesQuery = () => queryOptions({
+  queryKey: workspaceKey("listTunnelDevices"),
+  queryFn: ({ signal }) => api.listTunnelDevices(signal),
+  staleTime: 30_000,
+});
+
 export const getHarnessSetupCommandsQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnessSetupCommands"),
   queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),

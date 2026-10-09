@@ -95,6 +95,7 @@ for (const kind of ["local", "ssh"]) {
         "./components/Onboarding": { Onboarding: "Onboarding" },
         "./components/ProjectsHome": { ProjectsHome: "ProjectsHome" },
         "./components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
+        "./components/TunnelAccessBadge": { TunnelAccessBadge: "TunnelAccessBadge" },
         "./components/WorkspaceConnection": { WorkspaceConnection: "WorkspaceConnection" },
         "./components/UpdateBanner": { UpdateBanner: "UpdateBanner", useUpdateStatus: () => ({}) },
         "./components/DesktopAppBanner": { DesktopAppBanner: "DesktopAppBanner" },
