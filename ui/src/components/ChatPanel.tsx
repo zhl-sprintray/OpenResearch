@@ -201,6 +201,7 @@ import {
 } from "../composerCommands";
 import { ResumeDialog } from "./ResumeDialog";
 import { bashCommand, withoutBashPrefix } from "../bashCommand";
+import { composerPlaceholder } from "../composerPlaceholder";
 import { acceptsAttachment, attachmentAccept } from "../composerAttachments";
 import { MobileComposerMenu, MobileModelChip } from "./MobileComposer";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
@@ -6925,23 +6926,16 @@ export function ChatPanel({
                 // 16px on phones: iOS zooms into smaller focused inputs.
                 className={`relative z-1 bg-transparent ${mobile ? "text-base" : ""}`}
                 value={draft}
-                placeholder={
-                  // A pending question card owns typed text (see send()); say so.
-                  // While a steerable turn runs, Enter goes to that turn, so name
-                  // the gesture and its queue chord — the send button is a Stop
-                  // button for the whole busy stretch.
-                  // Otherwise follow `composerSelection` so the name tracks the
-                  // picker for a new session and the open session once one exists.
-                  pendingQuestion
-                    ? m.chat_type_custom_answer()
-                    : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
-                          : m.chat_harness_unavailable({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
-                        : m.chat_ask_agent_placeholder()
-                }
+                // The send button is a Stop button for the whole steering stretch.
+                // The harness follows `composerSelection` so the name tracks the
+                // picker for a new session and the open session once one exists.
+                placeholder={composerPlaceholder({
+                  answeringQuestion: Boolean(pendingQuestion),
+                  steer: steering && activeHarness ? { harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) } : null,
+                  harness: composerSelection ? ltr(HARNESS_LABELS[composerSelection.harness]) : null,
+                  harnessReady: Boolean(activeHarness?.agentReady),
+                  shell: !mobile && caps.shell,
+                })}
                 rows={2}
                 onPaste={onComposerPaste}
                 onDragOver={(e) => {
