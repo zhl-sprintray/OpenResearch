@@ -36,7 +36,8 @@ export function PlanStrip({
   /** The harness's display name for the strip copy (e.g. "Claude Code",
    * "Codex"); falls back to a generic label when the harness is unknown. */
   agentLabel: string;
-  onView: (intent: TabOpenIntent) => void;
+  /** Opens the full plan; omitted where the plan is already on screen. */
+  onView?: (intent: TabOpenIntent) => void;
   onApprove: (resumeMode?: "auto" | "bypassPermissions") => void;
   /** Claude approval chooses its next permission mode; Codex preserves the
    * current permission choice and only leaves the independent Plan axis. */
@@ -86,12 +87,14 @@ export function PlanStrip({
             ? m.plan_strip_agent_ready({ agent: ltr(agentLabel) })
             : m.plan_strip_agent_proposed({ agent: ltr(agentLabel) })}
         </span>
-        <button
-          className="plan-strip-open ms-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-sm cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
-          {...tabOpenGestureHandlers<HTMLButtonElement>(onView)}
-        >
-          {m.plan_strip_open_plan()}
-        </button>
+        {onView && (
+          <button
+            className="plan-strip-open ms-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-sm cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
+            {...tabOpenGestureHandlers<HTMLButtonElement>(onView)}
+          >
+            {m.plan_strip_open_plan()}
+          </button>
+        )}
       </div>
       {revising ? (
         <>
