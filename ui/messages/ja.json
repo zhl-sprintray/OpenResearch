@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "Finder で表示",
   "sidebar_filter": "フィルター",
   "sidebar_group_by": "グループ分け",
-  "sidebar_one_list": "1 つの一覧"
+  "sidebar_one_list": "1 つの一覧",
+  "mobile_menu": "メニュー",
+  "mobile_close_menu": "メニューを閉じる",
+  "mobile_back": "戻る",
+  "mobile_pending": "確認待ち",
+  "mobile_desktop_only_title": "デスクトップ専用",
+  "mobile_desktop_only_body": "この機能を使うには、パソコンでダッシュボードを開いてください。"
 }

@@ -1,6 +1,6 @@
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
-import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { fitSidebarRows, readSidebarIds, sidebarProjectSessions, sidebarRowHeight, sortSidebarProjects, toggleId, writeSidebarIds, type SessionFilter, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
@@ -3877,12 +3877,6 @@ const Transcript = memo(function Transcript({
 
 // --- session rail ------------------------------------------------------------
 
-type SessionFilter = "active" | "archived" | "all";
-
-/** Whether the rail's current filter shows a session in this archived state. */
-const matchesFilter = (filter: SessionFilter, archived: boolean) =>
-  filter === "all" ? true : filter === "archived" ? archived : !archived;
-
 /** Whether an event target sits inside the side-chat pane. */
 function inSideChat(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest("[data-side-chat]") !== null;
@@ -4239,6 +4233,7 @@ export function ChatPanel({
   preferredAutonomy,
   onPreferredAutonomyChange,
   embedded = false,
+  bare = false,
   onOpenSideChat,
   children,
 }: {
@@ -4309,6 +4304,9 @@ export function ChatPanel({
   /** A second instance hosting a side chat in the right pane: no rail, and
    * global shortcuts act on it only while focus is inside it. */
   embedded?: boolean;
+  /** Hosted by a shell that draws its own top bar and session navigation
+   * (MobileShell): no rail, reopen button, or session header. */
+  bare?: boolean;
   /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
   onOpenSideChat?: (parentSessionId: string, question: string) => void;
   /** Middle-pane content when a settings section is active. */
@@ -4331,18 +4329,8 @@ export function ChatPanel({
     try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
     catch { return "projects"; }
   });
-  const [pinnedProjects, setPinnedProjects] = useState<string[]>(() => {
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-pinned-projects") ?? "[]");
-      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
-    } catch { return []; }
-  });
-  const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => {
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-collapsed-projects") ?? "[]");
-      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
-    } catch { return []; }
-  });
+  const [pinnedProjects, setPinnedProjects] = useState(() => readSidebarIds("sidebar-pinned-projects"));
+  const [collapsedProjects, setCollapsedProjects] = useState(() => readSidebarIds("sidebar-collapsed-projects"));
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
@@ -4359,7 +4347,7 @@ export function ChatPanel({
     return () => observer.disconnect();
   }, [railOpen, embedded, mainView]);
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
-  const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
+  const sortedProjects = sortSidebarProjects(sidebarProjects, pinnedProjects, recentActivity);
   const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
   const currentProject = sidebarProjects.find((project) => project.id === projectId);
@@ -6130,9 +6118,7 @@ export function ChatPanel({
   if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
     const query = projectSessionsQueries[index];
     const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
-    const matching = projectSessions
-      .filter((session) => !session.sideParentSessionId && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const matching = sidebarProjectSessions(projectSessions, sessionFilter, activeId);
     const chatLimit = chatLimits[project.id] ?? 6;
     let visible = matching.slice(0, chatLimit);
     const selected = matching.find((session) => session.id === activeId);
@@ -6269,15 +6255,15 @@ export function ChatPanel({
                       collapsed={row.collapsed}
                       busy={row.busy}
                       onToggleCollapsed={() => {
-                        const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
+                        const next = toggleId(collapsedProjects, project.id);
                         setCollapsedProjects(next);
-                        try { localStorage.setItem("sidebar-collapsed-projects", JSON.stringify(next)); } catch {}
+                        writeSidebarIds("sidebar-collapsed-projects", next);
                       }}
                       pinned={pinnedProjects.includes(project.id)}
                       onPin={() => {
-                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+                        const next = toggleId(pinnedProjects, project.id);
                         setPinnedProjects(next);
-                        try { localStorage.setItem("sidebar-pinned-projects", JSON.stringify(next)); } catch {}
+                        writeSidebarIds("sidebar-pinned-projects", next);
                       }}
                       onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
                       onNewChat={() => {
@@ -6372,7 +6358,7 @@ export function ChatPanel({
   );
 
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
-  const railReopen = !railOpen && !embedded && (
+  const railReopen = !railOpen && !embedded && !bare && (
     <IconButton
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
@@ -6401,10 +6387,10 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
+      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded || bare ? "" : "mt-5"}`}>
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
+        {!bare && <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -6433,7 +6419,7 @@ export function ChatPanel({
             </IconButton>
           )}
           </div>
-        </div>
+        </div>}
 
         {contentError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">

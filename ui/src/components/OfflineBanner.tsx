@@ -8,8 +8,9 @@ import { isConnected, onConnectionChange } from "../events";
  *
  *  A banner rather than a blocking overlay — the transcript, logs, and diffs
  *  already rendered stay worth reading — and not dismissible, since nothing
- *  else on the page distinguishes stale from live. */
-export function OfflineBanner() {
+ *  else on the page distinguishes stale from live. `compact` (Mobile layout)
+ *  keeps it to one line. */
+export function OfflineBanner({ compact = false }: { compact?: boolean }) {
   const connected = useSyncExternalStore(onConnectionChange, isConnected, isConnected);
 
   return (
@@ -27,7 +28,7 @@ export function OfflineBanner() {
           aria-hidden
         >
           <CircleAlert size={13} className="shrink-0 text-accent-amber" />
-          <span dir="auto" className="min-w-0">{m.offline_banner_disconnected()}</span>
+          <span dir="auto" className={compact ? "min-w-0 truncate" : "min-w-0"}>{m.offline_banner_disconnected()}</span>
         </div>
       )}
     </>
