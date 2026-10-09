@@ -208,7 +208,7 @@ pub(super) async fn authenticate(
         Ok(Some(session)) => {
             let revoked = session.revoked.clone();
             request.extensions_mut().insert(session);
-            return close_on_revoke(next.run(request).await, revoked);
+            return close_stream_on(next.run(request).await, revoked);
         }
         Ok(None) => {}
         Err(error) => return ApiError::from(error).into_response(),
@@ -247,9 +247,10 @@ fn open_to_unpaired(method: &Method, path: &str) -> bool {
     }
 }
 
-/// Ends an event stream when its device is revoked. Other responses are
-/// complete bodies and need no help.
-fn close_on_revoke(response: Response, revoked: CancellationToken) -> Response {
+/// Ends an event stream when `closed` fires (its device is revoked, or
+/// Tunnel access is turned off). Other responses are complete bodies and
+/// need no help.
+pub(super) fn close_stream_on(response: Response, closed: CancellationToken) -> Response {
     let streaming = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -259,9 +260,7 @@ fn close_on_revoke(response: Response, revoked: CancellationToken) -> Response {
         return response;
     }
     let (parts, body) = response.into_parts();
-    let body = body
-        .into_data_stream()
-        .take_until(revoked.cancelled_owned());
+    let body = body.into_data_stream().take_until(closed.cancelled_owned());
     Response::from_parts(parts, Body::from_stream(body))
 }
 

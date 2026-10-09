@@ -9,6 +9,7 @@ use axum::http::{header, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use tokio_util::sync::CancellationToken;
 
 use super::devices::{self, PAIR_PAGE_PATH, PAIR_REDEEM_PATH};
 use super::{app, not_found, track_active, ApiError, AppState};
@@ -18,9 +19,9 @@ use crate::local::harness::{self, PermissionMode};
 use crate::store::StoredChatSession;
 
 /// The Tunnel port's router: the dashboard's routes behind the Tunnel guards,
-/// outermost first: secure headers, Origin, device authentication, route
-/// allowlist, Tunnel access marker.
-fn tunnel_router(state: AppState, origin: TunnelOrigin) -> Router {
+/// outermost first: open streams close on `closed`, secure headers, Origin,
+/// device authentication, route allowlist, Tunnel access marker.
+fn tunnel_router(state: AppState, origin: TunnelOrigin, closed: CancellationToken) -> Router {
     let devices = state.tunnel_devices.clone();
     app(state.clone())
         .merge(devices::pairing_routes().with_state(state))
@@ -36,6 +37,17 @@ fn tunnel_router(state: AppState, origin: TunnelOrigin) -> Router {
             require_tunnel_origin,
         ))
         .layer(middleware::from_fn(secure_headers))
+        .layer(middleware::from_fn_with_state(closed, close_on_shutdown))
+}
+
+/// Ends a Tunnel port event stream when the port shuts down, so turning
+/// Tunnel access off also ends the connections already open.
+async fn close_on_shutdown(
+    State(closed): State<CancellationToken>,
+    request: Request,
+    next: Next,
+) -> Response {
+    devices::close_stream_on(next.run(request).await, closed)
 }
 
 /// Present in a request's extensions when it arrived on the Tunnel port, so
@@ -566,10 +578,12 @@ pub(crate) async fn reject_tunnel_proxy_headers(request: Request, next: Next) ->
     next.run(request).await
 }
 
-/// A running Tunnel port listener. Dropping it stops serving.
+/// A running Tunnel port listener. Dropping it stops accepting at once and
+/// closes the connections already open: event streams end, and idle
+/// keep-alive connections are shut down.
 pub(super) struct TunnelPort {
     port: u16,
-    server: tokio::task::JoinHandle<()>,
+    closed: CancellationToken,
 }
 
 impl TunnelPort {
@@ -580,7 +594,7 @@ impl TunnelPort {
 
 impl Drop for TunnelPort {
     fn drop(&mut self) {
-        self.server.abort();
+        self.closed.cancel();
     }
 }
 
@@ -591,13 +605,18 @@ pub(super) async fn open_tunnel_port(state: AppState, origin: TunnelOrigin) -> R
         .await
         .map_err(|error| anyhow!("Could not open the Tunnel port: {error}"))?;
     let port = listener.local_addr()?.port();
-    let app = tunnel_router(state, origin);
-    let server = tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, app).await {
+    let closed = CancellationToken::new();
+    let app = tunnel_router(state, origin, closed.clone());
+    let shutdown = closed.clone().cancelled_owned();
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+        {
             eprintln!("orx up: Tunnel port stopped: {error}");
         }
     });
-    Ok(TunnelPort { port, server })
+    Ok(TunnelPort { port, closed })
 }
 
 #[cfg(test)]

@@ -723,6 +723,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabling_closes_open_tunnel_connections() {
+        let provider = FakeProvider::ready();
+        let control = control(provider.clone());
+        let state = state();
+        control.enable(&state).await.unwrap();
+        let port = provider.starts()[0];
+        let cookie = state.tunnel_devices.pair_for_test();
+        let mut events = crate::net::loopback_client()
+            .build()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/api/events"))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(events.status(), 200);
+
+        control.disable().await.unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(Some(_)) = events.chunk().await {}
+        })
+        .await;
+        assert!(closed.is_ok(), "the event stream outlived Tunnel access");
+    }
+
+    #[tokio::test]
     async fn the_enabled_setting_is_restored_on_the_next_start() {
         let config_dir = temp_config_dir();
         let first = TunnelAccessControl::new(FakeProvider::ready(), config_dir.clone());
