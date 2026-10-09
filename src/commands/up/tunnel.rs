@@ -341,9 +341,12 @@ fn current_mode(session: &StoredChatSession) -> Option<String> {
     harness::effective_permission_id(&session.harness, session.permission_mode.as_deref())
 }
 
-/// The permission mode a session created on this computer starts with: the
-/// preferred agent's mode when it is this harness, else the harness default.
-fn local_default_mode(
+/// The loosest permission mode a session created over Tunnel access may use:
+/// the mode the user chose locally for this harness (the preferred agent's),
+/// else the harness's strictest mode that still acts after asking — never its
+/// built-in default, which may approve on its own (Claude Code auto, Codex
+/// approve-for-me) or skip prompts entirely (Antigravity bypass).
+fn new_session_cap(
     state: &AppState,
     harness_id: &str,
 ) -> std::result::Result<Option<String>, ApiError> {
@@ -353,11 +356,24 @@ fn local_default_mode(
         .ui_state()?
         .preferred_agent
         .filter(|agent| agent.harness == harness_id)
-        .and_then(|agent| agent.permission_mode);
-    Ok(harness::effective_permission_id(
-        harness_id,
-        preferred.as_deref(),
-    ))
+        .and_then(|agent| agent.permission_mode)
+        .filter(|mode| harness::permission_mode_for(harness_id, mode).is_some());
+    Ok(preferred.or_else(|| strictest_asking_mode(harness_id)))
+}
+
+/// The harness's strictest advertised mode other than Plan (which executes
+/// nothing): the one that asks before every action needing approval.
+fn strictest_asking_mode(harness_id: &str) -> Option<String> {
+    harness::chat_harness(harness_id)?
+        .options()
+        .permission_modes
+        .into_iter()
+        .filter_map(|choice| {
+            let mode = PermissionMode::from_id(&choice.id)?;
+            (mode != PermissionMode::Plan).then_some((looseness(mode), choice.id))
+        })
+        .min_by_key(|(looseness, _)| *looseness)
+        .map(|(_, id)| id)
 }
 
 /// A change to an existing session's modes (a PATCH or a turn override):
@@ -388,14 +404,14 @@ pub(super) fn limit_session_change(
     Ok(())
 }
 
-/// A new session's permission mode: no looser than the local default, which
+/// A new session's permission mode: no looser than `new_session_cap`, which
 /// it also gets when none was asked for (the harness default may be looser).
 pub(super) fn limit_new_session(
     state: &AppState,
     harness_id: &str,
     permission_mode: Option<String>,
 ) -> std::result::Result<Option<String>, ApiError> {
-    let ceiling = local_default_mode(state, harness_id)?;
+    let ceiling = new_session_cap(state, harness_id)?;
     match permission_mode {
         Some(requested) if !within(harness_id, &requested, ceiling.as_deref()) => {
             Err(looser_refused())
@@ -419,7 +435,7 @@ pub(super) fn limit_resume_mode(
 ) -> std::result::Result<Option<String>, ApiError> {
     let session = chat_session(state, session_id)?;
     let current = current_mode(&session);
-    let local_default = local_default_mode(state, &session.harness)?;
+    let local_default = new_session_cap(state, &session.harness)?;
     let cap = match (current, local_default) {
         (Some(current), Some(local_default)) => {
             if within(&session.harness, &current, Some(&local_default)) {
@@ -988,10 +1004,14 @@ mod tests {
             ("claude-code", Some("acceptEdits"), true),
             ("claude-code", Some("plan"), true),
             ("claude-code", None, true),
-            // ...and the harness default for any other.
+            // ...and any other harness is capped at its strictest mode that
+            // still asks before acting, never its own (looser) default.
             ("codex", Some("full-access"), false),
-            ("codex", Some("approve-for-me"), true),
+            ("codex", Some("approve-for-me"), false),
             ("codex", Some("ask"), true),
+            ("antigravity", Some("bypass"), false),
+            ("antigravity", Some("default"), true),
+            ("antigravity", None, true),
         ] {
             let status = paired
                 .status(
@@ -1008,6 +1028,25 @@ mod tests {
             } else {
                 assert_eq!(status, 403, "{harness} {mode:?}");
             }
+        }
+    }
+
+    /// Antigravity defaults to bypass and Codex to approve-for-me; with no
+    /// local choice for them, a session created over Tunnel access still asks.
+    #[tokio::test]
+    async fn a_new_session_without_a_local_choice_asks_before_acting() {
+        let paired = Paired::open().await;
+        for (harness, expected) in [
+            ("antigravity", "default"),
+            ("codex", "ask"),
+            ("claude-code", "manual"),
+            ("cursor", "ask"),
+            ("opencode", "default"),
+        ] {
+            let Ok(mode) = limit_new_session(&paired.state, harness, None) else {
+                panic!("{harness}: no mode was refused");
+            };
+            assert_eq!(mode.as_deref(), Some(expected), "{harness}");
         }
     }
 
@@ -1042,14 +1081,15 @@ mod tests {
             .await;
         assert_eq!(steer, 403);
 
-        // Approving a plan leaves Plan, up to the local default (Claude
-        // Code's own default here: auto) and no further.
+        // Approving a plan leaves Plan, up to what a new session could start
+        // with (no local choice here: manual) and no further.
         let planning = paired.seed_session("claude-code", Some("plan"), false);
         let respond = format!("/api/chat/sessions/{planning}/respond");
         for (mode, allowed) in [
             (Some("bypassPermissions"), false),
-            (Some("auto"), true),
-            (Some("acceptEdits"), true),
+            (Some("auto"), false),
+            (Some("acceptEdits"), false),
+            (Some("manual"), true),
             (None, true),
         ] {
             let status = paired
