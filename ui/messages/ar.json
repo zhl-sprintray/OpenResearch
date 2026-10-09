@@ -1300,6 +1300,7 @@
   "tunnel_access_state_unavailable": "غير متاح",
   "tunnel_access_state_conflict": "المنفذ مستخدم",
   "tunnel_access_state_ready": "جاهز",
+  "tunnel_access_state_starting": "جارٍ البدء",
   "tunnel_access_state_connected": "متصل",
   "tunnel_access_state_disconnected": "غير متصل",
   "tunnel_access_address": "العنوان",
@@ -1327,6 +1328,7 @@
   "tunnel_access_revoke_confirm": "إبطال {name}؟ سيفقد الوصول فورًا.",
   "tunnel_access_revoke_all_confirm": "إبطال كل الأجهزة المقترنة؟ ستفقد الوصول فورًا ويجب إقرانها من جديد.",
   "tunnel_access_badge_on": "Tunnel access قيد التشغيل",
+  "tunnel_access_badge_starting": "يجري بدء Tunnel access",
   "tunnel_access_badge_disconnected": "Tunnel access غير متصل",
   "tunnel_access_badge_manage": "إدارة",
   "tunnel_access_device_paired_toast": "تم إقران جهاز جديد عبر Tunnel access: {name}"

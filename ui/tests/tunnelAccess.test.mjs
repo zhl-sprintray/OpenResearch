@@ -58,3 +58,11 @@ test("the QR pairing link puts the code in the fragment of the tunnel address", 
   assert.equal(pairingLink("https://laptop.example.ts.net", "/pair#K7Q2"), "https://laptop.example.ts.net/pair#K7Q2");
   assert.equal(pairingLink("https://laptop.example.ts.net/", "/pair#K7Q2"), "https://laptop.example.ts.net/pair#K7Q2");
 });
+
+test("a tunnel still starting is on, badged as starting, and cannot pair yet", () => {
+  const view = tunnelAccessView(status({ enabled: true, state: "starting" }));
+  assert.equal(view.enabled, true);
+  assert.equal(view.badge, "starting");
+  assert.equal(view.origin, null);
+  assert.equal(view.canAddDevice, false);
+});

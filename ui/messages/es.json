@@ -1300,6 +1300,7 @@
   "tunnel_access_state_unavailable": "No disponible",
   "tunnel_access_state_conflict": "Puerto en uso",
   "tunnel_access_state_ready": "Listo",
+  "tunnel_access_state_starting": "Iniciando",
   "tunnel_access_state_connected": "Conectado",
   "tunnel_access_state_disconnected": "Desconectado",
   "tunnel_access_address": "Dirección",
@@ -1327,6 +1328,7 @@
   "tunnel_access_revoke_confirm": "¿Revocar {name}? Pierde el acceso de inmediato.",
   "tunnel_access_revoke_all_confirm": "¿Revocar todos los dispositivos vinculados? Pierden el acceso de inmediato y deberán vincularse de nuevo.",
   "tunnel_access_badge_on": "Tunnel access está activado",
+  "tunnel_access_badge_starting": "Tunnel access se está iniciando",
   "tunnel_access_badge_disconnected": "Tunnel access está desconectado",
   "tunnel_access_badge_manage": "Gestionar",
   "tunnel_access_device_paired_toast": "Se vinculó un nuevo dispositivo a Tunnel access: {name}"

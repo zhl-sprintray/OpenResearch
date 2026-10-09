@@ -1300,6 +1300,7 @@
   "tunnel_access_state_unavailable": "사용 불가",
   "tunnel_access_state_conflict": "포트 사용 중",
   "tunnel_access_state_ready": "준비됨",
+  "tunnel_access_state_starting": "시작하는 중",
   "tunnel_access_state_connected": "연결됨",
   "tunnel_access_state_disconnected": "연결 끊김",
   "tunnel_access_address": "주소",
@@ -1327,6 +1328,7 @@
   "tunnel_access_revoke_confirm": "{name}을(를) 해제할까요? 즉시 접근 권한을 잃습니다.",
   "tunnel_access_revoke_all_confirm": "페어링된 모든 기기를 해제할까요? 즉시 접근 권한을 잃고 다시 페어링해야 합니다.",
   "tunnel_access_badge_on": "Tunnel access 켜짐",
+  "tunnel_access_badge_starting": "Tunnel access를 시작하는 중",
   "tunnel_access_badge_disconnected": "Tunnel access 연결 끊김",
   "tunnel_access_badge_manage": "관리",
   "tunnel_access_device_paired_toast": "새 기기가 Tunnel access로 페어링되었습니다: {name}"

@@ -1300,6 +1300,7 @@
   "tunnel_access_state_unavailable": "利用不可",
   "tunnel_access_state_conflict": "ポート使用中",
   "tunnel_access_state_ready": "準備完了",
+  "tunnel_access_state_starting": "起動中",
   "tunnel_access_state_connected": "接続済み",
   "tunnel_access_state_disconnected": "切断",
   "tunnel_access_address": "アドレス",
@@ -1327,6 +1328,7 @@
   "tunnel_access_revoke_confirm": "{name} を取り消しますか？すぐにアクセスできなくなります。",
   "tunnel_access_revoke_all_confirm": "ペアリング済みのデバイスをすべて取り消しますか？すぐにアクセスできなくなり、再ペアリングが必要です。",
   "tunnel_access_badge_on": "Tunnel access がオンです",
+  "tunnel_access_badge_starting": "Tunnel access を起動しています",
   "tunnel_access_badge_disconnected": "Tunnel access が切断されました",
   "tunnel_access_badge_manage": "管理",
   "tunnel_access_device_paired_toast": "新しいデバイスが Tunnel access でペアリングされました：{name}"

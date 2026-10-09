@@ -36,7 +36,11 @@ export function TunnelAccessBadge({ onOpen }: { onOpen?: () => void }) {
 
   if (!view?.badge) return null;
   const connected = view.badge === "connected";
-  const label = connected ? m.tunnel_access_badge_on() : m.tunnel_access_badge_disconnected();
+  const label = connected
+    ? m.tunnel_access_badge_on()
+    : view.badge === "starting"
+      ? m.tunnel_access_badge_starting()
+      : m.tunnel_access_badge_disconnected();
   return (
     <div
       className={`tunnel-access-badge flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text border-b ${connected ? "bg-accent-green-subtle border-b-accent-green" : "bg-accent-amber-subtle border-b-accent-amber"}`}

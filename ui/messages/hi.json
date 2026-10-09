@@ -1300,6 +1300,7 @@
   "tunnel_access_state_unavailable": "उपलब्ध नहीं",
   "tunnel_access_state_conflict": "पोर्ट उपयोग में",
   "tunnel_access_state_ready": "तैयार",
+  "tunnel_access_state_starting": "शुरू हो रहा है",
   "tunnel_access_state_connected": "कनेक्टेड",
   "tunnel_access_state_disconnected": "डिस्कनेक्टेड",
   "tunnel_access_address": "पता",
@@ -1327,6 +1328,7 @@
   "tunnel_access_revoke_confirm": "{name} की पहुँच रद्द करें? यह तुरंत पहुँच खो देगा।",
   "tunnel_access_revoke_all_confirm": "सभी पेयर किए गए डिवाइस की पहुँच रद्द करें? वे तुरंत पहुँच खो देंगे और उन्हें दोबारा पेयर करना होगा।",
   "tunnel_access_badge_on": "Tunnel access चालू है",
+  "tunnel_access_badge_starting": "Tunnel access शुरू हो रहा है",
   "tunnel_access_badge_disconnected": "Tunnel access डिस्कनेक्ट है",
   "tunnel_access_badge_manage": "प्रबंधित करें",
   "tunnel_access_device_paired_toast": "Tunnel access के लिए नया डिवाइस पेयर हुआ: {name}"

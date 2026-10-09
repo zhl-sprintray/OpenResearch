@@ -1499,6 +1499,7 @@ export type TunnelProviderState =
   | "unavailable"
   | "conflict"
   | "ready"
+  | "starting"
   | "connected"
   | "disconnected";
 

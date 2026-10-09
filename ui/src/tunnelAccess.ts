@@ -12,7 +12,7 @@ export interface TunnelAccessView {
   origin: string | null;
   canAddDevice: boolean;
   /** The main-UI status badge while Tunnel access is on. */
-  badge: "connected" | "disconnected" | null;
+  badge: "connected" | "starting" | "disconnected" | null;
   /** The provider's own explanation, shown verbatim. */
   message: string | null;
   /** What the user can do to make the provider usable. */
@@ -36,13 +36,20 @@ export function tunnelAccessView(status: TunnelStatus | null, { remote = false }
   const disabledReason = remote ? "remote" : status?.blocked ?? null;
   const live = !disabledReason && status?.enabled ? status : null;
   const connected = live?.state === "connected";
+  const badge: TunnelAccessView["badge"] = !live
+    ? null
+    : connected
+      ? "connected"
+      : live.state === "starting"
+        ? "starting"
+        : "disconnected";
   return {
     enabled: live !== null,
     toggleDisabled: disabledReason !== null,
     disabledReason,
     origin: live?.origin ?? null,
     canAddDevice: connected && live?.origin != null,
-    badge: live ? (connected ? "connected" : "disconnected") : null,
+    badge,
     message: status?.message ?? null,
     guidance: disabledReason || !status ? null : GUIDANCE[status.state] ?? null,
   };

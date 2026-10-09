@@ -65,6 +65,8 @@ pub(super) enum ProviderState {
     Unavailable,
     Conflict,
     Ready,
+    /// Turning on: checking the provider and starting it.
+    Starting,
     Connected,
     Disconnected,
 }
@@ -115,14 +117,38 @@ struct Inner {
     /// How another instance's refusal names this one.
     holder: String,
     blocked: Option<Blocked>,
-    /// The running session; the async lock serializes enable and disable.
+    /// The running session; the async lock serializes enable and disable,
+    /// and is held while the provider starts.
     session: tokio::sync::Mutex<Option<Session>>,
+    /// What `status` reports, readable without waiting for a start.
+    phase: std::sync::Mutex<Phase>,
+}
+
+/// Where Tunnel access stands, as last set by turning it on or off.
+#[derive(Clone)]
+enum Phase {
+    Off,
+    Starting,
+    On {
+        origin: String,
+        live: Arc<std::sync::Mutex<Live>>,
+    },
+}
+
+/// Resets a phase still `Starting` to `Off` when dropped.
+struct StartingGuard<'a>(&'a std::sync::Mutex<Phase>);
+
+impl Drop for StartingGuard<'_> {
+    fn drop(&mut self) {
+        let mut phase = self.0.lock().unwrap();
+        if matches!(*phase, Phase::Starting) {
+            *phase = Phase::Off;
+        }
+    }
 }
 
 /// Tunnel access while on: the Tunnel port and the supervised provider.
 struct Session {
-    origin: String,
-    live: Arc<std::sync::Mutex<Live>>,
     stop: tokio::sync::oneshot::Sender<()>,
     supervisor: tokio::task::JoinHandle<()>,
     _port: TunnelPort,
@@ -181,6 +207,7 @@ impl TunnelAccessControl {
                 holder: "another OpenResearch instance".into(),
                 blocked: None,
                 session: tokio::sync::Mutex::new(None),
+                phase: std::sync::Mutex::new(Phase::Off),
             }),
         }
     }
@@ -212,22 +239,25 @@ impl TunnelAccessControl {
                 blocked: Some(blocked),
             };
         }
-        if let Some(session) = self.inner.session.lock().await.as_ref() {
-            let live = session.live.lock().unwrap().clone();
-            let (state, message) = match live {
-                Live::Connected => (ProviderState::Connected, None),
-                Live::Disconnected { reason } => (ProviderState::Disconnected, Some(reason)),
-            };
-            return TunnelStatus {
-                enabled: true,
-                provider: PROVIDER_NAME,
-                state,
-                origin: Some(session.origin.clone()),
-                message,
-                blocked: None,
-            };
+        let phase = self.inner.phase.lock().unwrap().clone();
+        let (state, origin, message) = match phase {
+            Phase::Off => return idle_status(&self.inner.provider.check().await),
+            Phase::Starting => (ProviderState::Starting, None, None),
+            Phase::On { origin, live } => match live.lock().unwrap().clone() {
+                Live::Connected => (ProviderState::Connected, Some(origin), None),
+                Live::Disconnected { reason } => {
+                    (ProviderState::Disconnected, Some(origin), Some(reason))
+                }
+            },
+        };
+        TunnelStatus {
+            enabled: true,
+            provider: PROVIDER_NAME,
+            state,
+            origin,
+            message,
+            blocked: None,
         }
-        idle_status(&self.inner.provider.check().await)
     }
 
     /// Turns Tunnel access on and remembers it for later starts.
@@ -273,19 +303,27 @@ impl TunnelAccessControl {
         }
         let mut session = self.inner.session.lock().await;
         if session.is_none() {
-            *session = Some(self.start(state).await?);
+            *self.inner.phase.lock().unwrap() = Phase::Starting;
+            // A failed or abandoned start (its request dropped) is off again.
+            let _off_unless_started = StartingGuard(&self.inner.phase);
+            let (started, on) = self.start(state).await?;
+            *session = Some(started);
+            *self.inner.phase.lock().unwrap() = on;
         }
         Ok(())
     }
 
     async fn turn_off(&self) {
-        let session = self.inner.session.lock().await.take();
-        if let Some(session) = session {
+        let mut session = self.inner.session.lock().await;
+        *self.inner.phase.lock().unwrap() = Phase::Off;
+        if let Some(session) = session.take() {
             session.stop().await;
         }
     }
 
-    async fn start(&self, state: &AppState) -> Result<Session> {
+    /// Starts the Tunnel port and the provider; also returns the phase that
+    /// reports them.
+    async fn start(&self, state: &AppState) -> Result<(Session, Phase)> {
         let origin = match self.inner.provider.check().await {
             Availability::Ready { origin } => origin,
             unavailable => {
@@ -309,14 +347,15 @@ impl TunnelAccessControl {
             self.inner.backoff,
             stopped,
         ));
-        Ok(Session {
-            origin,
-            live,
-            stop,
-            supervisor,
-            _port: port,
-            _lock: lock,
-        })
+        Ok((
+            Session {
+                stop,
+                supervisor,
+                _port: port,
+                _lock: lock,
+            },
+            Phase::On { origin, live },
+        ))
     }
 
     /// One instance per user publishes at a time: the provider's public port
@@ -513,9 +552,18 @@ mod tests {
         /// Makes the running child exit with a reason.
         exits: Mutex<Vec<tokio::sync::oneshot::Sender<String>>>,
         stopped: Arc<std::sync::atomic::AtomicUsize>,
+        /// While set, the next start waits for the sender to fire.
+        held: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     }
 
     impl FakeProvider {
+        /// Makes the next start wait until the returned sender fires.
+        fn hold_start(&self) -> tokio::sync::oneshot::Sender<()> {
+            let (release, held) = tokio::sync::oneshot::channel();
+            *self.held.lock().unwrap() = Some(held);
+            release
+        }
+
         fn with(availability: Availability) -> Arc<Self> {
             Arc::new(Self {
                 availability: Mutex::new(Some(availability)),
@@ -555,6 +603,10 @@ mod tests {
 
         async fn start(&self, port: u16) -> Result<Box<dyn ProviderChild>> {
             self.started.lock().unwrap().push(port);
+            let held = self.held.lock().unwrap().take();
+            if let Some(held) = held {
+                let _ = held.await;
+            }
             let (exit, exited) = tokio::sync::oneshot::channel();
             self.exits.lock().unwrap().push(exit);
             Ok(Box::new(FakeChild {
@@ -720,6 +772,30 @@ mod tests {
             .send()
             .await;
         assert!(closed.is_err(), "the Tunnel port still answers");
+    }
+
+    #[tokio::test]
+    async fn the_status_answers_while_tunnel_access_is_starting() {
+        let provider = FakeProvider::ready();
+        let release = provider.hold_start();
+        let control = control(provider.clone());
+        let enabling = tokio::spawn({
+            let control = control.clone();
+            let state = state();
+            async move { control.enable(&state).await }
+        });
+        eventually(|| provider.starts().len() == 1).await;
+
+        let status = tokio::time::timeout(Duration::from_secs(1), control.status())
+            .await
+            .expect("the status waited for the provider to start");
+        assert!(status.enabled);
+        assert_eq!(status.state, ProviderState::Starting);
+
+        release.send(()).unwrap();
+        let started = enabling.await.unwrap().unwrap();
+        assert_eq!(started.state, ProviderState::Connected);
+        assert_eq!(control.status().await.state, ProviderState::Connected);
     }
 
     #[tokio::test]

@@ -31,6 +31,7 @@ const STATE_LABELS: Record<TunnelProviderState, () => string> = {
   unavailable: m.tunnel_access_state_unavailable,
   conflict: m.tunnel_access_state_conflict,
   ready: m.tunnel_access_state_ready,
+  starting: m.tunnel_access_state_starting,
   connected: m.tunnel_access_state_connected,
   disconnected: m.tunnel_access_state_disconnected,
 };
@@ -41,6 +42,7 @@ const STATE_VARIANTS: Record<TunnelProviderState, BadgeVariant> = {
   unavailable: "warning",
   conflict: "error",
   ready: "default",
+  starting: "default",
   connected: "success",
   disconnected: "warning",
 };

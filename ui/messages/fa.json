@@ -1300,6 +1300,7 @@
   "tunnel_access_state_unavailable": "در دسترس نیست",
   "tunnel_access_state_conflict": "درگاه در حال استفاده",
   "tunnel_access_state_ready": "آماده",
+  "tunnel_access_state_starting": "در حال راه‌اندازی",
   "tunnel_access_state_connected": "متصل",
   "tunnel_access_state_disconnected": "قطع",
   "tunnel_access_address": "نشانی",
@@ -1327,6 +1328,7 @@
   "tunnel_access_revoke_confirm": "دسترسی {name} لغو شود؟ بلافاصله دسترسی را از دست می‌دهد.",
   "tunnel_access_revoke_all_confirm": "دسترسی همهٔ دستگاه‌های جفت‌شده لغو شود؟ بلافاصله دسترسی را از دست می‌دهند و باید دوباره جفت شوند.",
   "tunnel_access_badge_on": "Tunnel access روشن است",
+  "tunnel_access_badge_starting": "Tunnel access در حال راه‌اندازی است",
   "tunnel_access_badge_disconnected": "Tunnel access قطع است",
   "tunnel_access_badge_manage": "مدیریت",
   "tunnel_access_device_paired_toast": "دستگاه تازه‌ای برای Tunnel access جفت شد: {name}"
