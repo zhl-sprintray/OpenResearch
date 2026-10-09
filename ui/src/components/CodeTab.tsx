@@ -26,6 +26,7 @@ export function CodeTab({
   project,
   experiment,
   view,
+  browseFiles = true,
   toggled,
   onViewChange,
   onToggledChange,
@@ -37,6 +38,9 @@ export function CodeTab({
   /** Experiment whose committed Git branch this tab displays. */
   experiment: Experiment;
   view: CodeView;
+  /** Offer the branch's file browser; without it (Tunnel access) the tab
+   * shows only the committed diff. */
+  browseFiles?: boolean;
   /** Dirs flipped away from their depth default (lives on the tab def). */
   toggled: ReadonlySet<string>;
   onViewChange: (view: CodeView) => void;
@@ -78,6 +82,7 @@ export function CodeTab({
       <CodeBrowserHeader
         view={view}
         onViewChange={onViewChange}
+        showViewToggle={browseFiles}
         branchLabel={branch}
         branchTitle={`Committed branch ${branch}`}
         githubHref={

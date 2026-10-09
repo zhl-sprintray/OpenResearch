@@ -119,7 +119,7 @@ import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { DesktopAppBanner } from "./components/DesktopAppBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { TunnelAccessBadge } from "./components/TunnelAccessBadge";
-import { capabilities, fileReadable } from "./capabilities";
+import { capabilities, codeTabView, fileReadable } from "./capabilities";
 import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { archiveActionsByExperiment } from "./components/ArchiveMenu";
@@ -1410,6 +1410,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       view: CodeView = "files",
       intent: TabOpenIntent = "preview",
     ) => {
+      // Over Tunnel access only the committed diff is readable.
+      view = codeTabView(caps, view);
       const opened: CodeTabDef = {
         code: true,
         experimentId,
@@ -1426,7 +1428,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       );
       openRightTab(opened, intent);
     },
-    [openRightTab],
+    [openRightTab, caps],
   );
 
   const updateCodeTab = useCallback(
@@ -2001,7 +2003,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         runs={scopedRuns}
                         project={activeProject}
                         onOpenView={openExperimentTab}
-                        onOpenCode={caps.codeFiles ? openCodeTabForExperiment : undefined}
+                        onOpenCode={openCodeTabForExperiment}
                         onArchive={caps.archiveExperiment ? archiveExperiment : undefined}
                         agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
                         onShowProjectScope={showProjectScope}
@@ -2028,7 +2030,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       onOpenLogs={(experimentId, runId, intent) => {
                         openExperimentTab(experimentId, "terminal", intent, runId);
                       }}
-                      onOpenCode={caps.codeFiles ? (experimentId, intent) => {
+                      onOpenCode={(experimentId, intent) => {
                         const experiment = experiments.find((item) => item.id === experimentId);
                         if (experiment)
                           openCodeTabForExperiment(
@@ -2037,7 +2039,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             "files",
                             intent,
                           );
-                      } : undefined}
+                      }}
                       onArchive={caps.archiveExperiment ? archiveExperiment : undefined}
                       onCancel={cancelRun}
                     />
@@ -2262,7 +2264,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     projectId={projectId}
                     project={activeProject}
                     experiment={codeExperiment}
-                    view={codeTab.view}
+                    view={codeTabView(caps, codeTab.view)}
+                    browseFiles={caps.codeFiles}
                     toggled={codeTab.toggled}
                     onViewChange={(view) => updateCodeTab(codeTab, { view })}
                     onToggledChange={(toggled) => updateCodeTab(codeTab, { toggled })}
@@ -2303,7 +2306,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         openExperimentTab(tabExperiment.id, view, intent, runId),
                       );
                     }}
-                    onOpenCode={caps.codeFiles ? (view, intent) =>
+                    onOpenCode={(view, intent) =>
                       openFromRightTab(expTab, () =>
                         openCodeTabForExperiment(
                           tabExperiment.id,
@@ -2312,7 +2315,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                           intent,
                         ),
                       )
-                    : undefined}
+                    }
                   />
                 )}
               </TabBody>
