@@ -32,6 +32,9 @@ export type MobileNavEvent =
   | { type: "closeNewSession" }
   | { type: "pushPanel"; panel: MobilePanel }
   | { type: "popPanel" }
+  /** The route's `pane` now shows `panel` (null: the chat), e.g. after a
+   * refresh, a shared link or browser back/forward. */
+  | { type: "routePanel"; panel: MobilePanel | null }
   /** The viewport crossed the 768px breakpoint; the current session (in the
    * route) is kept. */
   | { type: "viewportCrossed" };
@@ -50,7 +53,39 @@ export function mobileNavReducer(state: MobileNavState, event: MobileNavEvent): 
     case "closeNewSession": return { ...state, newSession: null };
     case "pushPanel": return { ...state, drawerOpen: false, panels: [...state.panels, event.panel] };
     case "popPanel": return state.panels.length ? { ...state, panels: state.panels.slice(0, -1) } : state;
+    case "routePanel": return { ...state, panels: restorePanelStack(state.panels, event.panel) };
     case "viewportCrossed": return { ...state, drawerOpen: false, panels: [] };
+  }
+}
+
+/** The stack to render when the route shows `top` (null: the chat). A panel
+ * already in the stack keeps its place (browser back drops what was above it;
+ * a different run of the same experiment replaces it); otherwise the route was
+ * opened directly and a detail panel gets its list underneath. */
+export function restorePanelStack(stack: readonly MobilePanel[], top: MobilePanel | null): MobilePanel[] {
+  if (!top) return [];
+  const index = stack.findIndex((panel) => panelIdentity(panel) === panelIdentity(top));
+  if (index !== -1) return [...stack.slice(0, index), top];
+  const parent = parentPanel(top);
+  return parent ? [parent, top] : [top];
+}
+
+function parentPanel(panel: MobilePanel): MobilePanel | null {
+  switch (panel.kind) {
+    case "experiment": return { kind: "experiments" };
+    case "artifact": return { kind: "artifacts" };
+    default: return null;
+  }
+}
+
+/** Which thing a panel shows, ignoring view state such as the selected run. */
+function panelIdentity(panel: MobilePanel): string {
+  switch (panel.kind) {
+    case "experiments": case "artifacts": return panel.kind;
+    case "experiment": return `experiment:${panel.experimentId}`;
+    case "artifact": return `artifact:${panel.path}`;
+    case "plan": return `plan:${panel.promptId}`;
+    case "subagent": return `subagent:${panel.partId}`;
   }
 }
 

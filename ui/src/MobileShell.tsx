@@ -9,7 +9,8 @@ import { StatusBadge } from "./components/StatusBadge";
 import { Button, IconButton, Spinner } from "./components/ui";
 import { cn } from "./components/ui/cn";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
-import { initialMobileNav, mobileNavReducer, panelToPane, pendingPrompts, type MobilePaneView, type MobilePanel } from "./mobileNav";
+import { MobilePanelBody } from "./components/MobilePanels";
+import { initialMobileNav, mobileNavReducer, panelToPane, pendingPrompts, restorePanelStack, type MobilePaneView, type MobilePanel } from "./mobileNav";
 import { m } from "./paraglide/messages.js";
 import { queryClient, setScopedQueryData } from "./queries/client";
 import { getChatMessagesQuery, listChatSessionsQuery } from "./queries/chat";
@@ -58,13 +59,27 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
     dispatch({ type: "selectSession" });
     go(taskLocation(options?.projectId ?? projectId, target), options?.replace);
   }, [go, projectId]);
+  const routedPanel = view.kind === "panel" ? view.panel : null;
+  const panels = restorePanelStack(nav.panels, routedPanel);
+  const showPanel = (panel: MobilePanel | undefined, replace = false) =>
+    go(taskLocation(projectId, sessionId, panel && panelToPane(panel, sessionId ?? "")), replace);
+  // Each panel action first syncs the stack to what the route shows (refresh,
+  // shared link, browser back), then pushes or pops.
   const openPanel = (panel: MobilePanel) => {
+    dispatch({ type: "routePanel", panel: routedPanel });
     dispatch({ type: "pushPanel", panel });
-    go(taskLocation(projectId, sessionId, panelToPane(panel, sessionId ?? "")));
+    showPanel(panel);
+  };
+  const replacePanel = (panel: MobilePanel) => {
+    dispatch({ type: "routePanel", panel: routedPanel });
+    dispatch({ type: "popPanel" });
+    dispatch({ type: "pushPanel", panel });
+    showPanel(panel, true);
   };
   const back = () => {
+    dispatch({ type: "routePanel", panel: routedPanel });
     dispatch({ type: "popPanel" });
-    go(taskLocation(projectId, sessionId));
+    showPanel(panels.at(-2));
   };
 
   const saveUiState = useMutation({
@@ -126,13 +141,12 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
           />
         )}
         {view.kind === "panel" && (
-          // Panel content arrives with the full-screen panels; the frame keeps
-          // deep links and Back working meanwhile.
           <section className="absolute inset-0 z-30 flex flex-col bg-background" data-pane={pane?.kind}>
             <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-2">
               <IconButton aria-label={m.mobile_back()} onClick={back}><ArrowLeft size={18} className="rtl:rotate-180" /></IconButton>
               <div className="min-w-0 flex-1 truncate px-1 text-sm font-medium">{panelTitle(view.panel)}</div>
             </div>
+            <MobilePanelBody projectId={projectId} sessionId={sessionId} panel={view.panel} onOpen={openPanel} onReplace={replacePanel} onBack={back} />
           </section>
         )}
         {view.kind === "desktopOnly" && (

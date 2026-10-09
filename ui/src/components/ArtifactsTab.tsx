@@ -206,16 +206,16 @@ export function ArtifactMarkdown({
   );
 }
 
-type PreviewKind = "markdown" | MediaPreviewKind | "text" | "download";
+export type PreviewKind = "markdown" | MediaPreviewKind | "text" | "download";
 
-function previewKind(entry: ArtifactEntry): PreviewKind {
+export function previewKind(entry: ArtifactEntry): PreviewKind {
   if (entry.presentation === "text" && isMarkdownFile(entry.name)) return "markdown";
   return mediaPreviewKind(entry.presentation) ??
     (entry.presentation === "text" || entry.presentation === "unknown" ? "text" : "download");
 }
 
 /** Fetched body for kinds that need text: markdown or raw text. */
-function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
+export function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
   const wantsText = kind === "markdown" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
   const options = getArtifactFileTextQuery(projectId, entry.path);
   const query = useQuery({ ...options, enabled: wantsText, subscribed: wantsText });
