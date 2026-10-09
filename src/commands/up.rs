@@ -49,6 +49,7 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
+mod devices;
 mod harness_setup;
 mod tunnel;
 use compute_settings::*;
@@ -132,6 +133,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        tunnel_devices: Arc::new(devices::TunnelDevices::new(None)),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -415,6 +417,8 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    /// Devices paired for Tunnel access and outstanding pairing codes.
+    tunnel_devices: Arc<devices::TunnelDevices>,
 }
 
 async fn project_publication_lock(
@@ -818,6 +822,18 @@ fn routes() -> RouteTable {
     .route("/api/internal/permissions", post(bridge_permission))
     .route("/api/chat/attachments/{name}", get(chat_attachment))
     .route("/api/agent/status", get(agent_status))
+    .route(
+        "/api/tunnel/pairing-codes",
+        post(devices::mint_pairing_code),
+    )
+    .route(
+        "/api/tunnel/devices",
+        get(devices::list_devices).delete(devices::revoke_all_devices),
+    )
+    .route(
+        "/api/tunnel/devices/{id}",
+        axum::routing::patch(devices::rename_device).delete(devices::revoke_device),
+    )
 }
 
 /// Routes plus SPA fallback over the shared state, before any listener's guards.
@@ -8152,6 +8168,7 @@ fn mime_for(path: &str) -> &'static str {
         Some("css") => "text/css",
         Some("svg") => "image/svg+xml",
         Some("json") | Some("map") => "application/json",
+        Some("webmanifest") => "application/manifest+json",
         Some("png") => "image/png",
         Some("ico") => "image/x-icon",
         Some("woff2") => "font/woff2",
@@ -8160,19 +8177,23 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
-fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
-    // index.html must revalidate every load or browsers heuristically cache it
-    // and keep loading a stale (hashed) bundle; the hashed assets themselves
-    // are immutable by name. favicon.svg is likewise served under a fixed name.
-    let cache = if path == "index.html" || path == "favicon.svg" {
+/// index.html must revalidate every load or browsers heuristically cache it
+/// and keep loading a stale (hashed) bundle; the hashed assets themselves are
+/// immutable by name. favicon.svg and the web app manifest are likewise served
+/// under fixed names.
+fn asset_cache_control(path: &str) -> &'static str {
+    if matches!(path, "index.html" | "favicon.svg" | "manifest.webmanifest") {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
-    };
+    }
+}
+
+fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     (
         [
             (header::CONTENT_TYPE, mime_for(path)),
-            (header::CACHE_CONTROL, cache),
+            (header::CACHE_CONTROL, asset_cache_control(path)),
         ],
         file.data.into_owned(),
     )
@@ -8200,6 +8221,20 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 mod tests {
     use super::*;
 
+    #[test]
+    fn web_app_manifest_is_typed_and_revalidated() {
+        assert_eq!(
+            mime_for("manifest.webmanifest"),
+            "application/manifest+json"
+        );
+        assert_eq!(asset_cache_control("manifest.webmanifest"), "no-cache");
+        assert_eq!(asset_cache_control("favicon.svg"), "no-cache");
+        assert_eq!(
+            asset_cache_control("assets/index-abc123.js"),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
     /// An `AppState` like `run`'s, without a dashboard lock or background tasks.
     pub(super) fn test_state() -> AppState {
         let agent = Arc::new(AgentHost::new(None));
@@ -8222,6 +8257,9 @@ mod tests {
             stopping: Arc::new(AtomicBool::new(false)),
             dashboard_lock: Arc::new(std::sync::Mutex::new(None)),
             restart: Arc::new(tokio::sync::Notify::new()),
+            tunnel_devices: Arc::new(devices::TunnelDevices::new(Some(
+                std::env::temp_dir().join(format!("orx-tunnel-devices-{}", uuid::Uuid::new_v4())),
+            ))),
         }
     }
 
