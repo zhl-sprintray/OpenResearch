@@ -65,7 +65,9 @@ impl TunnelDevices {
         }
     }
 
-    fn store(&self) -> Result<Store> {
+    /// The store Tunnel access reads: paired devices, and the sessions and
+    /// defaults the permission-mode limit compares against.
+    pub(super) fn store(&self) -> Result<Store> {
         match &self.store_dir {
             Some(dir) => Store::open_at(dir.clone()),
             None => Store::open(),
@@ -125,6 +127,19 @@ impl TunnelDevices {
             device_id: device.id,
             revoked,
         }))
+    }
+
+    /// Pairs a device without the code dance and returns its `Cookie` header
+    /// value, for tests of what a paired device may do.
+    #[cfg(test)]
+    pub(super) fn pair_for_test(&self) -> String {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        self.store()
+            .unwrap()
+            .insert_tunnel_device(&id, "Test device", &digest(&token), self.now())
+            .unwrap();
+        format!("{DEVICE_COOKIE}={token}")
     }
 
     fn session_token(&self, device_id: &str) -> CancellationToken {
