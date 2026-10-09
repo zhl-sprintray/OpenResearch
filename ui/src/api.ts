@@ -1935,6 +1935,9 @@ export interface ChatSession {
   busy: boolean;
   activeLeafId: string | null;
   contextUsage?: ContextUsage;
+  /** Unresolved prompt cards (permission, plan, question) awaiting the user,
+   * server-computed on a project's session list; absent on `chat.session` events. */
+  pendingPromptIds?: readonly string[];
 }
 
 export const listChatSessions = (projectId: string, signal?: AbortSignal) =>

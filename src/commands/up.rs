@@ -7164,10 +7164,23 @@ async fn list_chat_sessions(
         (None, Some("all")) => store.list_all_chat_sessions()?,
         (None, _) => return Err(bad_request("projectId or scope=all is required")),
     };
+    // A project's list carries each session's unanswered prompt cards for the
+    // Mobile layout's Pending-prompt indicator; the `/resume` picker skips it.
+    let mut pending = if q.project_id.is_some() {
+        local::chat::pending_prompt_ids(&store, sessions.iter().map(|s| &s.id))?
+    } else {
+        Default::default()
+    };
     let busy = state.chat.busy_sessions().await;
     let sessions: Vec<Value> = sessions
         .iter()
-        .map(|s| local::chat::session_json(s, busy.contains(&s.id)))
+        .map(|s| {
+            let mut value = local::chat::session_json(s, busy.contains(&s.id));
+            if q.project_id.is_some() {
+                value["pendingPromptIds"] = json!(pending.remove(&s.id).unwrap_or_default());
+            }
+            value
+        })
         .collect();
     Ok(Json(json!({ "sessions": sessions })))
 }

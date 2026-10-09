@@ -2971,6 +2971,20 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// `parts_json` of a session's assistant messages that may hold an
+    /// unanswered prompt card, oldest first. A text prefilter: callers parse
+    /// the parts to confirm.
+    pub fn chat_parts_with_open_prompts(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            r#"SELECT parts_json FROM chat_messages
+             WHERE session_id = ?1 AND role = 'assistant'
+               AND parts_json LIKE '%"resolved":false%'
+             ORDER BY created_at ASC, rowid ASC"#,
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn has_chat_messages(&self, session_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE session_id = ?1)",

@@ -2,7 +2,7 @@ import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { ArrowLeft, ChevronDown, ChevronRight, FlaskConical, Menu, Monitor, Package, Plus, SquarePen } from "lucide-react";
 import { useCallback, useReducer, useRef, useState } from "react";
-import { DEFAULT_AUTONOMY, timeAgo, updateUiState, type AgentSelection, type Autonomy, type ChatMessage, type ChatSession, type Project, type RuntimeInfo, type UiState } from "./api";
+import { DEFAULT_AUTONOMY, timeAgo, updateUiState, type AgentSelection, type Autonomy, type ChatSession, type Project, type RuntimeInfo, type UiState } from "./api";
 import { ChatPanel } from "./components/ChatPanel";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { StatusBadge } from "./components/StatusBadge";
@@ -14,7 +14,7 @@ import { MobileNewSession } from "./MobileNewSession";
 import { initialMobileNav, mobileNavReducer, panelToPane, pendingPrompts, restorePanelStack, type MobilePaneView, type MobilePanel } from "./mobileNav";
 import { m } from "./paraglide/messages.js";
 import { queryClient, setScopedQueryData } from "./queries/client";
-import { getChatMessagesQuery, listChatSessionsQuery } from "./queries/chat";
+import { listChatSessionsQuery } from "./queries/chat";
 import { getUiStateQuery, listProjectActivityQuery, listProjectsQuery } from "./queries/projects";
 import { readSidebarIds, sidebarProjectSessions, sortSidebarProjects, toggleId, writeSidebarIds } from "./sidebarLayout";
 import { useMobileSwipe } from "./useMobileSwipe";
@@ -48,15 +48,15 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
   const [pinned] = useState(() => readSidebarIds("sidebar-pinned-projects"));
   const sortedProjects = sortSidebarProjects(projects, pinned, new Map(activity.map((item) => [item.projectId, item.lastActivityAt])));
   const sessionQueries = useQueries({
-    queries: sortedProjects.map((project) => ({ ...listChatSessionsQuery(project.id), enabled: nav.drawerOpen || project.id === projectId })),
+    // Every project's list feeds the pending badge, not just the open drawer.
+    queries: sortedProjects.map((project) => listChatSessionsQuery(project.id)),
   });
   const sessionsByProject = new Map(sortedProjects.map((project, index) => [project.id, sessionQueries[index]]));
   const currentSessions = sessionsByProject.get(projectId)?.data;
   const project = projects.find((item) => item.id === projectId);
   const session = sessionId ? currentSessions?.find((item) => item.id === sessionId) : undefined;
   const allSessions = sessionQueries.flatMap((query) => query.data ?? EMPTY_SESSIONS);
-  const pending = pendingPrompts(allSessions, Object.fromEntries(allSessions.map((item) =>
-    [item.id, queryClient.getQueryData<{ messages: ChatMessage[] }>(getChatMessagesQuery(item.id).queryKey)?.messages])));
+  const pending = pendingPrompts(allSessions);
 
   const go = useCallback((href: string, replace = false) => void router.navigate({ href, replace }), [router]);
   const openSession = useCallback((target: string | null, options?: { replace?: boolean; projectId?: string }) => {
