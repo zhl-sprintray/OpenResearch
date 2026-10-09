@@ -10,24 +10,25 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
-use super::{app, track_active, ApiError, AppState, UiDist};
+use super::devices::{self, PAIR_PAGE_PATH, PAIR_REDEEM_PATH};
+use super::{app, track_active, ApiError, AppState};
 use crate::commands::up_remote::secure_response;
 use crate::error::{anyhow, Result};
-
-/// The pairing page a paired QR code opens; the code rides in the `#` fragment.
-const PAIR_PAGE_PATH: &str = "/pair";
-/// Where the pairing page redeems its code for a device cookie.
-const PAIR_REDEEM_PATH: &str = "/api/tunnel/pair";
 
 /// The Tunnel port's router: the dashboard's routes behind the Tunnel guards,
 /// outermost first: secure headers, Origin, device authentication, route
 /// allowlist, Tunnel access marker.
 fn tunnel_router(state: AppState, origin: TunnelOrigin) -> Router {
-    app(state)
+    let devices = state.tunnel_devices.clone();
+    app(state.clone())
+        .merge(devices::pairing_routes().with_state(state))
         .route_layer(middleware::from_fn(mark_tunnel_access))
         .route_layer(middleware::from_fn(require_allowed_route))
         .layer(middleware::from_fn(track_active))
-        .layer(middleware::from_fn(authenticate))
+        .layer(middleware::from_fn_with_state(
+            devices,
+            devices::authenticate,
+        ))
         .layer(middleware::from_fn_with_state(
             origin,
             require_tunnel_origin,
@@ -64,8 +65,6 @@ async fn require_allowed_route(request: Request, next: Next) -> Response {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TunnelRoute {
-    // Constructed once the first dashboard route is opened to Tunnel access.
-    #[allow(dead_code)]
     Allow,
     Deny,
 }
@@ -74,8 +73,13 @@ enum TunnelRoute {
 /// path, is explicitly allowed or denied. `None` means unclassified, which is
 /// refused at runtime and fails the completeness test.
 fn classify(method: &Method, route: &str) -> Option<TunnelRoute> {
-    use TunnelRoute::Deny;
+    use TunnelRoute::{Allow, Deny};
     match (method, route) {
+        // Pairing, on the Tunnel port only.
+        (&Method::GET | &Method::HEAD, PAIR_PAGE_PATH) | (&Method::POST, PAIR_REDEEM_PATH) => {
+            Some(Allow)
+        }
+        (_, PAIR_PAGE_PATH | PAIR_REDEEM_PATH) => Some(Deny),
         // Browsing.
         (
             _,
@@ -220,7 +224,11 @@ fn classify(method: &Method, route: &str) -> Option<TunnelRoute> {
             | "/api/local-models/{id}"
             | "/api/user-skills"
             | "/api/latex-templates"
-            | "/api/internal/permissions",
+            | "/api/internal/permissions"
+            // Pairing codes and the device list are managed from this computer.
+            | "/api/tunnel/pairing-codes"
+            | "/api/tunnel/devices"
+            | "/api/tunnel/devices/{id}",
         ) => Some(Deny),
         _ => None,
     }
@@ -272,35 +280,6 @@ async fn require_tunnel_origin(
         return ApiError(StatusCode::FORBIDDEN, "Invalid Origin header.".into()).into_response();
     }
     next.run(request).await
-}
-
-/// Device authentication hook. Placeholder until device pairing exists: every
-/// request is unauthenticated, so only pairing paths and static assets pass.
-async fn authenticate(request: Request, next: Next) -> Response {
-    if open_to_unpaired(request.method(), request.uri().path()) {
-        return next.run(request).await;
-    }
-    ApiError(
-        StatusCode::UNAUTHORIZED,
-        "Pair this device from the desktop dashboard first.".into(),
-    )
-    .into_response()
-}
-
-/// What a device that has not paired may load: the pairing page, the redeem
-/// endpoint, and built UI assets — never the app shell or any data.
-fn open_to_unpaired(method: &Method, path: &str) -> bool {
-    match *method {
-        Method::POST => path == PAIR_REDEEM_PATH,
-        Method::GET | Method::HEAD => {
-            path == PAIR_PAGE_PATH
-                || path
-                    .strip_prefix('/')
-                    .filter(|asset| !asset.is_empty() && *asset != "index.html")
-                    .is_some_and(|asset| UiDist::get(asset).is_some())
-        }
-        _ => false,
-    }
 }
 
 /// Headers tunnels and reverse proxies add (Tailscale serve, cloudflared,
@@ -430,11 +409,13 @@ mod tests {
         let response = client()
             .post(url(&port, PAIR_REDEEM_PATH))
             .header("origin", TUNNEL_ORIGIN)
+            .json(&serde_json::json!({ "code": "unknown" }))
             .send()
             .await
             .unwrap();
-        // Not registered until device pairing lands, but past authentication.
-        assert_eq!(response.status(), 404);
+        // Past authentication and the allowlist: the handler itself refuses
+        // the unknown code.
+        assert_eq!(response.status(), 400);
     }
 
     #[tokio::test]
