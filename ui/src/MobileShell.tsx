@@ -1,7 +1,7 @@
 import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { ArrowLeft, ChevronDown, ChevronRight, FlaskConical, Menu, Monitor, Package, Plus, SquarePen } from "lucide-react";
-import { useCallback, useReducer, useState } from "react";
+import { useCallback, useReducer, useRef, useState } from "react";
 import { DEFAULT_AUTONOMY, timeAgo, updateUiState, type AgentSelection, type Autonomy, type ChatMessage, type ChatSession, type Project, type RuntimeInfo, type UiState } from "./api";
 import { ChatPanel } from "./components/ChatPanel";
 import { OfflineBanner } from "./components/OfflineBanner";
@@ -16,6 +16,7 @@ import { queryClient, setScopedQueryData } from "./queries/client";
 import { getChatMessagesQuery, listChatSessionsQuery } from "./queries/chat";
 import { getUiStateQuery, listProjectActivityQuery, listProjectsQuery } from "./queries/projects";
 import { readSidebarIds, sidebarProjectSessions, sortSidebarProjects, toggleId, writeSidebarIds } from "./sidebarLayout";
+import { useMobileSwipe } from "./useMobileSwipe";
 import { useVisualViewportStyle } from "./useVisualViewport";
 import { taskLocation, type Pane } from "./workspaceState";
 
@@ -71,6 +72,12 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
     go(taskLocation(projectId, sessionId));
   };
 
+  const shellRef = useRef<HTMLDivElement>(null);
+  useMobileSwipe(shellRef, { drawerOpen: nav.drawerOpen, panelOpen: view.kind !== "chat" }, (action) => {
+    if (action === "popPanel") back();
+    else dispatch({ type: action });
+  });
+
   const saveUiState = useMutation({
     mutationFn: updateUiState,
     onMutate: (body) => setScopedQueryData(uiStateOptions.queryKey, (current: UiState | undefined) => current && { ...current, ...body }),
@@ -84,7 +91,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
     : sessionId && currentSessions && !session ? m.model_picker_unavailable() : null;
 
   return (
-    <div className="mobile-shell relative flex h-full w-full flex-col overflow-hidden bg-background text-text" style={viewportStyle}>
+    <div ref={shellRef} className="mobile-shell relative flex h-full w-full flex-col overflow-hidden bg-background text-text" style={viewportStyle}>
       {runtime.kind === "local" && <OfflineBanner compact />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} compact />}
       <header className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-2">
