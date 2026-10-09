@@ -14,6 +14,9 @@ export interface Capabilities {
   cancelRun: boolean;
   /** Change a session's permission or Plan mode (the server keeps it same-or-stricter). */
   permissionMode: boolean;
+  /** Pick a permission mode looser than the session's (or, for a new
+   * session, than the locally chosen one); see `permissionPicker`. */
+  permissionModeLoosening: boolean;
   /** Project terminal and SSH connect terminals. */
   terminal: boolean;
   /** `!` shell commands in the composer. */
@@ -56,6 +59,47 @@ export interface Capabilities {
   endTurnApprovals: boolean;
 }
 
+/** How much a permission mode lets the agent do unasked, strictest first:
+ * plan, ask, accept edits, auto, bypass. Mirrors the server's
+ * `PermissionMode::from_id`, which every harness's wire ids resolve through. */
+function looseness(id: string): number | null {
+  switch (id) {
+    case "plan": return 0;
+    case "ask": case "manual": case "default": return 1;
+    case "accept-edits": case "acceptEdits": return 2;
+    case "auto": case "approve-for-me": case "auto-approve": return 3;
+    case "bypass": case "bypassPermissions": case "full-access": return 4;
+    default: return null;
+  }
+}
+
+/** The permission modes the composer offers, and the one it shows when none
+ * is chosen. Over Tunnel access a mode may only stay the same or get
+ * stricter than `ceiling`: the open session's mode, or for a new session
+ * the mode chosen locally for this harness. Without one, the server caps at
+ * the harness's strictest mode that still asks (never its own default). */
+export function permissionPicker<T extends { id: string }>(
+  caps: Capabilities,
+  choices: T[],
+  ceiling: string | null | undefined,
+  harnessDefault: string | null | undefined,
+): { choices: T[]; defaultId: string | null } {
+  if (caps.permissionModeLoosening) return { choices, defaultId: harnessDefault ?? null };
+  const asking = choices
+    .filter((choice) => (looseness(choice.id) ?? 0) > 0)
+    .reduce<T | null>((best, choice) => (best && looseness(best.id)! <= looseness(choice.id)! ? best : choice), null);
+  const cap = choices.find((choice) => choice.id === ceiling) ?? asking;
+  const limit = cap ? looseness(cap.id) : null;
+  if (limit === null) return { choices: [], defaultId: null };
+  return {
+    choices: choices.filter((choice) => {
+      const rank = looseness(choice.id);
+      return rank !== null && rank <= limit;
+    }),
+    defaultId: cap?.id ?? null,
+  };
+}
+
 /** Whether this permission card must be approved on the computer: an
  * end-turn Claude approval (no live bridge request to answer) in a session
  * not already bypassing permissions. Denying it stays possible. */
@@ -91,6 +135,7 @@ export function capabilities(runtime: RuntimeInfo): Capabilities {
     newSession: true,
     cancelRun: true,
     permissionMode: true,
+    permissionModeLoosening: local,
     terminal: local,
     shell: local,
     codeFiles: local,

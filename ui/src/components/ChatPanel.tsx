@@ -125,7 +125,7 @@ import {
   type StarterPrompt,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
-import { approveOnComputer, capabilities, hiddenComposerCommands } from "../capabilities";
+import { approveOnComputer, capabilities, hiddenComposerCommands, permissionPicker } from "../capabilities";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   splitTurnParts,
@@ -4700,6 +4700,12 @@ export function ChatPanel({
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
   const opts = activeHarness?.options;
+  // Over Tunnel access the picker stops at the session's current mode (or,
+  // before it exists, the mode chosen on the computer for this harness).
+  const permissionCeiling = openSession
+    ? openSession.permissionMode ?? opts?.defaultPermissionMode
+    : preferredAgent?.harness === rawSelection?.harness ? preferredAgent?.permissionMode : null;
+  const permission = permissionPicker(caps, opts?.permissionModes ?? [], permissionCeiling, opts?.defaultPermissionMode);
   const commands = useMemo(
     () => commandsForHarness(skills, opts?.planActivation, hiddenCommands),
     [skills, opts?.planActivation, hiddenCommands],
@@ -7130,9 +7136,9 @@ export function ChatPanel({
                       {
                         title: m.model_picker_mode(),
                         // Plan has its own switch above.
-                        choices: (opts?.permissionModes ?? []).filter((choice) => composerSelection?.harness !== "claude-code" || choice.id !== "plan"),
-                        effectiveId: composerSelection?.permissionMode ?? opts?.defaultPermissionMode ?? opts?.permissionModes?.[0]?.id,
-                        defaultId: opts?.defaultPermissionMode ?? null,
+                        choices: permission.choices.filter((choice) => composerSelection?.harness !== "claude-code" || choice.id !== "plan"),
+                        effectiveId: composerSelection?.permissionMode ?? permission.defaultId ?? permission.choices[0]?.id,
+                        defaultId: permission.defaultId,
                         onSelect: setPermissionMode,
                       },
                       {
@@ -7150,8 +7156,8 @@ export function ChatPanel({
                   value={composerSelection}
                   onSelect={selectModel}
                   onOpenSettings={caps.settings ? () => onSelectMainView("harnesses") : undefined}
-                  permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
-                  defaultPermissionId={opts?.defaultPermissionMode ?? null}
+                  permissionChoices={activeHarness?.agentReady ? permission.choices : []}
+                  defaultPermissionId={permission.defaultId}
                   onSelectPermission={setPermissionMode}
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}

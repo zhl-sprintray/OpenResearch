@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { approveOnComputer, capabilities, hiddenComposerCommands } from "../src/capabilities.ts";
+import { approveOnComputer, capabilities, hiddenComposerCommands, permissionPicker } from "../src/capabilities.ts";
 
 const local = { kind: "local", version: "1.0.0" };
 const tunnel = { kind: "local", version: "1.0.0", tunnelAccess: true };
@@ -90,4 +90,32 @@ test("over Tunnel access an end-turn Claude approval is left to the computer", (
 test("over Tunnel access a plan approval leaves the resume mode to the server", () => {
   assert.equal(capabilities(tunnel).planResumeModes, false);
   assert.equal(capabilities(local).planResumeModes, true);
+});
+
+const choice = (id) => ({ id, label: id });
+const claudeModes = ["manual", "acceptEdits", "plan", "auto", "bypassPermissions"].map(choice);
+const codexModes = ["ask", "approve-for-me", "full-access"].map(choice);
+const ids = (picker) => picker.choices.map((item) => item.id);
+
+test("over Tunnel access the mode picker lists nothing looser than the ceiling", () => {
+  const picker = permissionPicker(capabilities(tunnel), claudeModes, "acceptEdits", "auto");
+  assert.deepEqual(ids(picker), ["manual", "acceptEdits", "plan"]);
+  assert.equal(picker.defaultId, "acceptEdits");
+  assert.deepEqual(ids(permissionPicker(capabilities(tunnel), codexModes, "approve-for-me", "approve-for-me")), [
+    "ask",
+    "approve-for-me",
+  ]);
+});
+
+test("over Tunnel access with no ceiling the picker stops at the strictest asking mode", () => {
+  const claude = permissionPicker(capabilities(tunnel), claudeModes, null, "auto");
+  assert.deepEqual(ids(claude), ["manual", "plan"]);
+  assert.equal(claude.defaultId, "manual");
+  assert.deepEqual(ids(permissionPicker(capabilities(tunnel), codexModes, null, "approve-for-me")), ["ask"]);
+});
+
+test("locally the mode picker lists every mode with the harness default", () => {
+  const picker = permissionPicker(capabilities(local), claudeModes, "manual", "auto");
+  assert.deepEqual(ids(picker), ids({ choices: claudeModes }));
+  assert.equal(picker.defaultId, "auto");
 });
