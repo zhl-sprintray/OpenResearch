@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "Finder में दिखाएँ",
   "sidebar_filter": "फ़िल्टर",
   "sidebar_group_by": "समूह बनाएँ",
-  "sidebar_one_list": "एक सूची में"
+  "sidebar_one_list": "एक सूची में",
+  "mobile_menu": "मेनू",
+  "mobile_close_menu": "मेनू बंद करें",
+  "mobile_back": "वापस",
+  "mobile_pending": "लंबित",
+  "mobile_desktop_only_title": "केवल डेस्कटॉप पर उपलब्ध",
+  "mobile_desktop_only_body": "इसका उपयोग करने के लिए डैशबोर्ड को कंप्यूटर पर खोलें।"
 }

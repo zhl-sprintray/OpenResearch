@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "Finder에서 표시",
   "sidebar_filter": "필터",
   "sidebar_group_by": "그룹화 기준",
-  "sidebar_one_list": "단일 목록"
+  "sidebar_one_list": "단일 목록",
+  "mobile_menu": "메뉴",
+  "mobile_close_menu": "메뉴 닫기",
+  "mobile_back": "뒤로",
+  "mobile_pending": "확인 대기",
+  "mobile_desktop_only_title": "데스크톱 전용",
+  "mobile_desktop_only_body": "이 기능을 사용하려면 컴퓨터에서 대시보드를 여세요."
 }

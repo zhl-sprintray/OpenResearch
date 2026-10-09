@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "Reveal in Finder",
   "sidebar_filter": "Filter",
   "sidebar_group_by": "Group by",
-  "sidebar_one_list": "In one list"
+  "sidebar_one_list": "In one list",
+  "mobile_menu": "Menu",
+  "mobile_close_menu": "Close menu",
+  "mobile_back": "Back",
+  "mobile_pending": "Pending",
+  "mobile_desktop_only_title": "Desktop only",
+  "mobile_desktop_only_body": "Open the dashboard on a computer to use this."
 }

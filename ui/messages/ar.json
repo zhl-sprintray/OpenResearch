@@ -1278,5 +1278,11 @@
   "sidebar_reveal_project": "إظهار في Finder",
   "sidebar_filter": "تصفية",
   "sidebar_group_by": "تجميع حسب",
-  "sidebar_one_list": "في قائمة واحدة"
+  "sidebar_one_list": "في قائمة واحدة",
+  "mobile_menu": "القائمة",
+  "mobile_close_menu": "إغلاق القائمة",
+  "mobile_back": "رجوع",
+  "mobile_pending": "بانتظار التأكيد",
+  "mobile_desktop_only_title": "متاح على سطح المكتب فقط",
+  "mobile_desktop_only_body": "افتح لوحة التحكم على جهاز كمبيوتر لاستخدام هذه الميزة."
 }
