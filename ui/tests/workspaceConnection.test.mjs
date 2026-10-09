@@ -92,7 +92,7 @@ for (const kind of ["local", "ssh"]) {
         "@tanstack/react-router": { useNavigate: () => () => {} },
         "./RemoteRuntime": { useRuntime: () => runtime },
         "./capabilities": load("capabilities.ts", {}),
-        "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {},
+        "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {}, "./useMobileLayout": { useMobileLayout: () => false },
         "./paraglide/messages.js": messages,
         "./components/Onboarding": { Onboarding: "Onboarding" },
         "./components/ProjectsHome": { ProjectsHome: "ProjectsHome" },

@@ -34,7 +34,7 @@ function loadModule(filename, api = {}, remembered = null) {
       if (id === "./workspaceTabs") return load(new URL("./workspaceTabs.ts", url));
       if (id === "../App") return { default: () => react.createElement("main", { "data-shell": "desktop" }) };
       if (id === "../MobileShell") return { MobileShell: ({ view }) => react.createElement("main", { "data-shell": "mobile", "data-view": view.kind }) };
-      if (id === "../useMobileLayout" || id === "../mobileNav") return load(new URL(`${id}.ts`, url));
+      if (id === "../useMobileLayout" || id === "../mobileNav" || id === "./mobileNav") return load(new URL(`${id}.ts`, url));
       if (id === "../RemoteRuntime") return { RuntimeRoot: () => react.createElement(routing.Outlet), useRuntime: () => ({ kind: "local" }) };
       if (id === "../routePages") return { ResumeGlobal: () => null, ResumeProject: () => null, ProjectsPage: () => null };
       if (id.startsWith("./routes/")) return load(new URL(`${id}.tsx`, url));
@@ -125,6 +125,29 @@ test("project resume uses API order, keeps remembered pane, and falls back to ne
   assert.equal(await empty.projectResumeLocation("p"), "/projects/p/tasks/new");
 });
 
+test("mobile resume drops desktop-only panes and pages from persisted state and lands on the chat", async () => {
+  const files = { kind: "home", view: "files" };
+  const experiments = { kind: "home", view: "experiments" };
+  const sessions = [{ id: "latest", projectId: "p", archived: false }, { id: "old", projectId: "p", archived: false }];
+  for (const [location, expected] of [
+    [workspace.taskLocation("p", "old", files), "/projects/p/tasks/old"],
+    [workspace.taskLocation("p", "old", { kind: "code", experimentId: "e", branch: "main", view: "changes" }), "/projects/p/tasks/old"],
+    [workspace.taskLocation("p", "old", experiments), workspace.taskLocation("p", "old", experiments)],
+    ["/projects/p/settings/tunnel", "/projects/p/tasks/latest"],
+    ["/projects/p/skills", "/projects/p/tasks/latest"],
+  ]) {
+    const api = resumeApi(location, sessions, undefined, { latest: { active: files } });
+    const { globalResumeLocation, projectResumeLocation } = loadModule("routeResume.ts", api);
+    assert.equal(await globalResumeLocation(undefined, { mobile: true }), expected, `global ${location}`);
+    assert.equal(await projectResumeLocation("p", undefined, { mobile: true }), expected, `project ${location}`);
+    // The desktop keeps resuming exactly where it was.
+    assert.equal(await globalResumeLocation(), location, `desktop ${location}`);
+  }
+  const remembered = loadModule("routeResume.ts", resumeApi(null, sessions, undefined, { latest: { active: files } }));
+  assert.equal(await remembered.projectResumeLocation("p", undefined, { mobile: true }), "/projects/p/tasks/latest");
+  assert.equal(await remembered.projectResumeLocation("p"), workspace.taskLocation("p", "latest", files));
+});
+
 test("resume uses the current database response and current queued preference; failed reads never become defaults", async () => {
   const saved = "/projects/p/settings/git";
   const api = resumeApi(saved);
@@ -175,7 +198,7 @@ for (const projectId of [undefined, "p"]) {
         return new Promise(() => {});
       };
       const locations = loadModule("routeResume.ts", api);
-      const setup = resumeEffect({ ...locations, client, projectId, isCancelledError: query.isCancelledError,
+      const setup = resumeEffect({ ...locations, client, projectId, mobile: false, isCancelledError: query.isCancelledError,
         setError: value => { error = value; }, setAttempt: update => { attempt = update(attempt); },
         navigate: ({ href }) => { navigated = href; },
       });
@@ -205,7 +228,7 @@ for (const projectId of [undefined, "p"]) {
 test("resume still exposes real failures instead of automatically retrying them", async () => {
   const failure = new Error("HTTP 503");
   let error, attempts = 0;
-  const setup = resumeEffect({ projectId: "p", client: {},
+  const setup = resumeEffect({ projectId: "p", client: {}, mobile: false,
     projectResumeLocation: async () => { throw failure; }, globalResumeLocation: async () => "/projects",
     isCancelledError: query.isCancelledError, navigate: () => assert.fail("must not navigate"),
     setError: value => { error = value; }, setAttempt: () => { attempts++; },

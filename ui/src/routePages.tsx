@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { useRuntime } from "./RemoteRuntime";
 import { capabilities } from "./capabilities";
+import { useMobileLayout } from "./useMobileLayout";
 
 import { clearReadDemoSessions } from "./demoSessionState";
 import { globalResumeLocation, projectResumeLocation } from "./routeResume";
@@ -45,10 +46,12 @@ function Resume({ projectId }: { projectId?: string }) {
   const navigate = useNavigate();
   const [error, setError] = useState<Error | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // Read once per resume: persisted desktop panes must not strand a phone on "Desktop only".
+  const mobile = useMobileLayout();
   useEffect(() => {
     let current = true;
     setError(null);
-    void (projectId ? projectResumeLocation(projectId, client) : globalResumeLocation(client))
+    void (projectId ? projectResumeLocation(projectId, client, { mobile }) : globalResumeLocation(client, { mobile }))
       .then((href) => { if (current) void navigate({ href, replace: true }); })
       .catch((cause: unknown) => {
         if (!current) return;
@@ -57,7 +60,7 @@ function Resume({ projectId }: { projectId?: string }) {
         else setError(cause instanceof Error ? cause : new Error(String(cause)));
       });
     return () => { current = false; };
-  }, [projectId, attempt, navigate, client]);
+  }, [projectId, attempt, navigate, client, mobile]);
   return error ? <RouteFailure error={error} reset={() => setAttempt((value) => value + 1)} /> : <RoutePending />;
 }
 
