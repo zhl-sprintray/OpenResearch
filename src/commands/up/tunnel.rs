@@ -421,39 +421,67 @@ pub(super) fn limit_new_session(
     }
 }
 
-/// The mode an answered prompt resumes under, capped at the looser of the
-/// session's current mode and the local default — never past what a session
-/// created over Tunnel access could start with. Approving a plan necessarily
-/// leaves Plan, so the cap is not just the current mode. With no explicit
-/// choice the cap itself is returned, so the harness never falls back to its
-/// own default (Claude Code resumes a permission approval under
-/// bypassPermissions).
+/// The mode an answered prompt resumes under, never looser than the session
+/// is now. The one exception is approving a plan, which necessarily leaves
+/// Plan: it may resume up to `new_session_cap`, what a session created over
+/// Tunnel access could start with. With no explicit choice the cap itself is
+/// returned, so the harness never falls back to its own default (Claude Code
+/// resumes a permission approval under bypassPermissions).
+///
+/// A live Claude approval (a held bridge request) grants just that one tool
+/// call without touching the mode. An end-turn one only takes effect by
+/// resuming under bypassPermissions, so unless the session already bypasses
+/// it is refused: it would loosen the session, and under a capped mode the
+/// tool is denied again and the card loops.
 pub(super) fn limit_resume_mode(
     state: &AppState,
     session_id: &str,
+    prompt_id: &str,
+    approve: bool,
     resume_mode: Option<&str>,
 ) -> std::result::Result<Option<String>, ApiError> {
     let session = chat_session(state, session_id)?;
+    let store = state.tunnel_devices.store()?;
+    let prompt = crate::local::chat::unresolved_prompt_in(&store, session_id, prompt_id)?;
     let current = current_mode(&session);
-    let local_default = new_session_cap(state, &session.harness)?;
-    let cap = match (current, local_default) {
-        (Some(current), Some(local_default)) => {
-            if within(&session.harness, &current, Some(&local_default)) {
-                Some(local_default)
-            } else {
-                Some(current)
-            }
-        }
-        (current, local_default) => current.or(local_default),
+    let in_plan = current
+        .as_deref()
+        .and_then(|mode| harness::permission_mode_for(&session.harness, mode))
+        == Some(PermissionMode::Plan);
+    let leaving_plan = approve && in_plan && prompt.as_ref().is_some_and(|p| p.kind == "plan");
+    let cap = if leaving_plan {
+        new_session_cap(state, &session.harness)?
+    } else {
+        current
     };
-    match resume_mode.filter(|mode| !mode.trim().is_empty()) {
+    let resolved = match resume_mode.filter(|mode| !mode.trim().is_empty()) {
         Some(requested) if within(&session.harness, requested, cap.as_deref()) => {
-            Ok(Some(requested.to_string()))
+            Some(requested.to_string())
         }
-        Some(_) => Err(looser_refused()),
-        None => Ok(cap),
+        Some(_) => return Err(looser_refused()),
+        None => cap,
+    };
+    let end_turn_approval = approve
+        && prompt
+            .as_ref()
+            .is_some_and(|p| p.kind == "permission" && p.native_id.is_none());
+    let bypassing = resolved
+        .as_deref()
+        .and_then(|mode| harness::permission_mode_for(&session.harness, mode))
+        == Some(PermissionMode::Bypass);
+    if end_turn_approval && session.harness == CLAUDE_CODE && !bypassing {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "Approving this action would loosen the session's permission mode. Approve it on \
+             your computer."
+                .into(),
+        ));
     }
+    Ok(resolved)
 }
+
+/// Claude Code's harness id: its end-turn approvals need bypassPermissions.
+const CLAUDE_CODE: &str = "claude-code";
 
 /// The tunnel's public https origin, e.g. `https://laptop.tailnet.ts.net`.
 #[derive(Clone)]
@@ -803,6 +831,35 @@ mod tests {
             id
         }
 
+        /// Stores an unanswered prompt card in `session` and returns its id.
+        /// `native` marks a held mid-turn card (the Claude bridge's live
+        /// approval) rather than one that resumes with a new message.
+        fn seed_prompt(&self, session_id: &str, kind: &str, native: bool) -> String {
+            let prompt_id = format!("prompt_{}", uuid::Uuid::new_v4().simple());
+            let mut prompt = json!({ "kind": kind, "resolved": false });
+            if native {
+                prompt["nativeId"] = json!(format!("perm_{prompt_id}"));
+            }
+            let parts = json!([{ "id": prompt_id, "type": "prompt", "prompt": prompt }]);
+            self.state
+                .tunnel_devices
+                .store()
+                .unwrap()
+                .upsert_chat_message(&crate::store::StoredChatMessage {
+                    id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+                    session_id: session_id.into(),
+                    role: "assistant".into(),
+                    parts_json: parts.to_string(),
+                    created_at: 1,
+                    completed_at: Some(1),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                })
+                .unwrap();
+            prompt_id
+        }
+
         /// Makes state-changing handlers stop at their first guard, so a test
         /// sees a request get past the Tunnel access checks without it acting.
         fn hold_mutations(&self) {
@@ -1084,6 +1141,7 @@ mod tests {
         // Approving a plan leaves Plan, up to what a new session could start
         // with (no local choice here: manual) and no further.
         let planning = paired.seed_session("claude-code", Some("plan"), false);
+        let plan = paired.seed_prompt(&planning, "plan", false);
         let respond = format!("/api/chat/sessions/{planning}/respond");
         for (mode, allowed) in [
             (Some("bypassPermissions"), false),
@@ -1096,7 +1154,7 @@ mod tests {
                 .status(
                     Method::POST,
                     &respond,
-                    Some(json!({ "promptId": "p", "resumeMode": mode })),
+                    Some(json!({ "promptId": plan, "resumeMode": mode })),
                 )
                 .await;
             if allowed {
@@ -1109,10 +1167,10 @@ mod tests {
 
     /// Answering a prompt runs the agent, so this checks the resume mode the
     /// respond handler hands on over Tunnel access, fed through Claude Code's
-    /// real resume rules: a permission approval with no `resumeMode` (which
-    /// locally resumes under bypassPermissions) stays within the cap.
+    /// real resume rules: answering never resumes a session looser than it
+    /// is now, even with a looser local default.
     #[tokio::test]
-    async fn approving_a_claude_permission_without_a_resume_mode_stays_within_the_cap() {
+    async fn answering_a_prompt_never_resumes_a_session_looser_than_it_is() {
         let paired = Paired::open().await;
         paired
             .state
@@ -1128,23 +1186,100 @@ mod tests {
             })
             .unwrap();
         let session = paired.seed_session("claude-code", Some("manual"), false);
-        let Ok(resume_mode) = limit_resume_mode(&paired.state, &session, None) else {
-            panic!("the session exists");
+        // A live (bridged) approval grants just that one call; a question
+        // answer resumes a turn. Neither may leave manual.
+        for (kind, native) in [("permission", true), ("question", false)] {
+            let prompt = paired.seed_prompt(&session, kind, native);
+            let Ok(resume_mode) = limit_resume_mode(&paired.state, &session, &prompt, true, None)
+            else {
+                panic!("{kind}: refused");
+            };
+            assert_eq!(resume_mode.as_deref(), Some("manual"), "{kind}");
+            let refused =
+                limit_resume_mode(&paired.state, &session, &prompt, true, Some("acceptEdits"));
+            assert!(refused.is_err(), "{kind}: acceptEdits is looser");
+        }
+
+        // Approving a plan leaves Plan, but only up to the new-session cap.
+        let planning = paired.seed_session("claude-code", Some("plan"), false);
+        let plan = paired.seed_prompt(&planning, "plan", false);
+        let Ok(resume_mode) = limit_resume_mode(&paired.state, &planning, &plan, true, None) else {
+            panic!("plan approval refused");
         };
-        assert_eq!(resume_mode.as_deref(), Some("acceptEdits"));
         let answer = crate::local::chat::PromptAnswer {
-            session_id: session,
-            prompt_id: "p".into(),
+            session_id: planning.clone(),
+            prompt_id: plan.clone(),
             approve: true,
             resume_mode,
             answers: Vec::new(),
             note: None,
             annotations: Vec::new(),
         };
-        for kind in ["permission", "plan"] {
-            let (_, mode) = crate::local::harness::claude::synthesize_resume(kind, &answer);
-            assert_eq!(mode, Some(PermissionMode::AcceptEdits), "{kind}");
-        }
+        let (_, mode) = crate::local::harness::claude::synthesize_resume("plan", &answer);
+        assert_eq!(mode, Some(PermissionMode::AcceptEdits));
+        // Rejecting a plan stays in Plan.
+        assert!(
+            limit_resume_mode(&paired.state, &planning, &plan, false, Some("acceptEdits")).is_err()
+        );
+    }
+
+    /// Claude Code re-denies a blocked tool unless the session resumes under
+    /// bypassPermissions, so an end-turn approval would loosen the session
+    /// (or loop forever under a capped mode). Over Tunnel access it is refused
+    /// with a reason; a live bridged approval grants just that call.
+    #[tokio::test]
+    async fn an_end_turn_claude_approval_is_left_to_the_computer() {
+        let paired = Paired::open().await;
+        paired.hold_mutations();
+        let session = paired.seed_session("claude-code", Some("acceptEdits"), false);
+        let respond = format!("/api/chat/sessions/{session}/respond");
+
+        let end_turn = paired.seed_prompt(&session, "permission", false);
+        let response = paired
+            .request(Method::POST, &respond)
+            .json(&json!({ "promptId": end_turn, "approve": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+        let body: Value = response.json().await.unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("on your computer")),
+            "{body}"
+        );
+        // Denying it changes nothing, so it stays possible.
+        let deny = paired
+            .status(
+                Method::POST,
+                &respond,
+                Some(json!({ "promptId": end_turn, "approve": false })),
+            )
+            .await;
+        assert!(REACHED_HANDLER.contains(&deny), "{deny}");
+
+        let live = paired.seed_prompt(&session, "permission", true);
+        let approve = paired
+            .status(
+                Method::POST,
+                &respond,
+                Some(json!({ "promptId": live, "approve": true })),
+            )
+            .await;
+        assert!(REACHED_HANDLER.contains(&approve), "{approve}");
+
+        // Already bypassing: resuming under bypass loosens nothing.
+        let bypassing = paired.seed_session("claude-code", Some("bypassPermissions"), false);
+        let card = paired.seed_prompt(&bypassing, "permission", false);
+        let approve = paired
+            .status(
+                Method::POST,
+                &format!("/api/chat/sessions/{bypassing}/respond"),
+                Some(json!({ "promptId": card, "approve": true })),
+            )
+            .await;
+        assert!(REACHED_HANDLER.contains(&approve), "{approve}");
     }
 
     #[tokio::test]

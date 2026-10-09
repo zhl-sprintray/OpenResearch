@@ -62,8 +62,10 @@ import {
   X,
 } from "lucide-react";
 import {
+  createContext,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -123,7 +125,7 @@ import {
   type StarterPrompt,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
-import { capabilities, hiddenComposerCommands } from "../capabilities";
+import { approveOnComputer, capabilities, hiddenComposerCommands } from "../capabilities";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   splitTurnParts,
@@ -2581,6 +2583,19 @@ function ToolGroup({
   );
 }
 
+/** How this connection may answer prompt cards (Tunnel access narrows it);
+ * the chat panel provides it for its active session. */
+interface PromptPolicy {
+  /** The permission card must be approved on the computer (`approveOnComputer`). */
+  approveOnComputer: (prompt: ChatPrompt) => boolean;
+  /** A plan approval may pick its resume mode (`Capabilities.planResumeModes`). */
+  planResumeModes: boolean;
+}
+const PromptPolicyContext = createContext<PromptPolicy>({
+  approveOnComputer: () => false,
+  planResumeModes: true,
+});
+
 /** Interactive card for a plan / permission / question prompt. Approving (or
  * answering) resumes the session. Once resolved, cards mirror Claude Code:
  * a permission leaves no trace, a plan collapses to an expandable
@@ -2599,6 +2614,8 @@ function PromptCard({
 }) {
   const p = part.prompt as ChatPrompt;
   const [picked, setPicked] = useState<string[]>([]);
+  const policy = useContext(PromptPolicyContext);
+  const onComputer = policy.approveOnComputer(p);
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
   const done = !onRespond;
 
@@ -2700,12 +2717,20 @@ function PromptCard({
             provides onOpenPlan): same action semantics as the strip. */}
         {!done && !docked && (
           <div className={PROMPT_ACTIONS_CLASS_NAME}>
-            <Button size="small" variant="primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
-              {m.chat_panel_accept_and_auto_mode()}
-            </Button>
-            <Button size="small" onClick={() => respond({ approve: true, resumeMode: "bypassPermissions" })}>
-              {m.chat_panel_accept_and_bypass_all()}
-            </Button>
+            {policy.planResumeModes ? (
+              <>
+                <Button size="small" variant="primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
+                  {m.chat_panel_accept_and_auto_mode()}
+                </Button>
+                <Button size="small" onClick={() => respond({ approve: true, resumeMode: "bypassPermissions" })}>
+                  {m.chat_panel_accept_and_bypass_all()}
+                </Button>
+              </>
+            ) : (
+              <Button size="small" variant="primary" onClick={() => respond({ approve: true })}>
+                {m.plan_strip_accept_plan()}
+              </Button>
+            )}
             <Button size="small" onClick={() => respond({ approve: false })}>
               {m.chat_panel_reject()}
             </Button>
@@ -2752,6 +2777,11 @@ function PromptCard({
             // blocked tool — acceptEdits would re-deny Bash); inline harnesses
             // (opencode) reply once/reject keyed off `approve`. Deny denies either way.
             <div className="prompt-actions flex items-center justify-end gap-2 pt-0.5">
+              {onComputer && (
+                <span className="prompt-on-computer me-auto text-sm text-subtext">
+                  {m.chat_panel_approve_on_computer()}
+                </span>
+              )}
               <Button
                 size="small"
                 variant="ghost"
@@ -2759,13 +2789,15 @@ function PromptCard({
               >
                 {m.chat_panel_deny()}
               </Button>
-              <Button
-                size="small"
-                variant="primary"
-                onClick={() => respond({ approve: true })}
-              >
-                {m.chat_panel_allow()}
-              </Button>
+              {!onComputer && (
+                <Button
+                  size="small"
+                  variant="primary"
+                  onClick={() => respond({ approve: true })}
+                >
+                  {m.chat_panel_allow()}
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -5230,6 +5262,11 @@ export function ChatPanel({
   }, [state.busySessions, state.messagesBySession]);
   const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
   const activeSession = openSession;
+  const promptPolicy = useMemo<PromptPolicy>(() => ({
+    approveOnComputer: (prompt) =>
+      approveOnComputer(caps, activeSession?.harness, activeSession?.permissionMode, prompt),
+    planResumeModes: caps.planResumeModes,
+  }), [caps, activeSession?.harness, activeSession?.permissionMode]);
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
@@ -6547,6 +6584,7 @@ export function ChatPanel({
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <PromptPolicyContext.Provider value={promptPolicy}>
                 <Transcript
                   key={activeId}
                   scrollRef={threadRef}
@@ -6572,6 +6610,7 @@ export function ChatPanel({
                   onRecover={recoverFailedTurn}
                   skills={transcriptSkills}
                 />
+                </PromptPolicyContext.Provider>
               </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
@@ -6635,7 +6674,7 @@ export function ChatPanel({
               agentLabel={
                 activeSession ? HARNESS_LABELS[activeSession.harness] : m.chat_the_agent()
               }
-              showResumeModes={activeSession?.harness === "claude-code"}
+              showResumeModes={activeSession?.harness === "claude-code" && caps.planResumeModes}
               onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
               onApprove={(resumeMode) =>
                 respond({

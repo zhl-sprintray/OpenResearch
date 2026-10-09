@@ -14,6 +14,7 @@ import {
   type Run,
 } from "../api";
 import { ltr } from "../i18n";
+import { capabilities } from "../capabilities";
 import { appendLogTail, emptyLogTail, logTailLines } from "../logTail";
 import type { MobilePanel } from "../mobileNav";
 import { m } from "../paraglide/messages.js";
@@ -21,6 +22,7 @@ import { getChatMessagesQuery, listChatSessionsQuery } from "../queries/chat";
 import { queryClient } from "../queries/client";
 import { getArtifactsQuery } from "../queries/files";
 import { listExperimentsQuery, listProjectsQuery, listRunsQuery } from "../queries/projects";
+import { useRuntime } from "../RemoteRuntime";
 import { followRunLog } from "../runLogStream";
 import { useFileVersion } from "../useFileVersion";
 import { ArtifactMarkdown, findArtifactEntry, previewKind, useTextBody } from "./ArtifactsTab";
@@ -369,6 +371,7 @@ function PlanPanel({ projectId, sessionId, promptId, onAnswered }: {
 }) {
   const messagesQuery = useQuery(getChatMessagesQuery(sessionId));
   const { data: sessions } = useQuery(listChatSessionsQuery(projectId));
+  const caps = capabilities(useRuntime());
   const [error, setError] = useState<string | null>(null);
   if (!messagesQuery.data) return messagesQuery.error ? <Unavailable /> : <Loading />;
   let part: ChatPart | null = null;
@@ -399,7 +402,7 @@ function PlanPanel({ projectId, sessionId, promptId, onAnswered }: {
           <PlanStrip
             synthesized={!!prompt.synthesized}
             agentLabel={harness ? HARNESS_LABELS[harness] : m.chat_the_agent()}
-            showResumeModes={harness === "claude-code"}
+            showResumeModes={harness === "claude-code" && caps.planResumeModes}
             onApprove={(resumeMode) => respond({ approve: true, ...(resumeMode ? { resumeMode } : {}) })}
             onReject={() => respond({ approve: false })}
             onRevise={(note) => respond({ approve: false, note })}

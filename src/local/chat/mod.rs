@@ -6669,7 +6669,15 @@ impl ResumeCtx {
 /// the answer first. Returns `None` if there's no such card *or* it's already
 /// resolved, so a double-answer is a no-op rather than a second resume.
 fn unresolved_prompt(session_id: &str, prompt_id: &str) -> Result<Option<WirePrompt>> {
-    let store = Store::open()?;
+    unresolved_prompt_in(&Store::open()?, session_id, prompt_id)
+}
+
+/// [`unresolved_prompt`] read from `store`.
+pub(crate) fn unresolved_prompt_in(
+    store: &Store,
+    session_id: &str,
+    prompt_id: &str,
+) -> Result<Option<WirePrompt>> {
     for msg in store.list_chat_messages(session_id)?.iter().rev() {
         if msg.role != "assistant" {
             continue;

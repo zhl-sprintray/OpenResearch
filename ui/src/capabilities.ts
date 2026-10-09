@@ -4,7 +4,7 @@
  * only presentation — the server enforces the boundary. Independent of the
  * Mobile layout: any combination of layout and access can occur. */
 
-import type { RuntimeInfo } from "./api";
+import type { ChatPrompt, RuntimeInfo } from "./api";
 import type { ComposerCommandName } from "./composerCommands";
 
 export interface Capabilities {
@@ -47,6 +47,31 @@ export interface Capabilities {
   remoteHosts: boolean;
   /** The Tunnel access settings section and its status badge. */
   tunnelSettings: boolean;
+  /** Pick the mode a Claude plan approval resumes under (auto, bypass). Over
+   * Tunnel access the server picks, capped at what a new session may use. */
+  planResumeModes: boolean;
+  /** Approve a Claude permission card that resumes by message: Claude only
+   * grants the blocked tool under bypassPermissions, which would loosen the
+   * session, so over Tunnel access it is approved on the computer instead. */
+  endTurnApprovals: boolean;
+}
+
+/** Whether this permission card must be approved on the computer: an
+ * end-turn Claude approval (no live bridge request to answer) in a session
+ * not already bypassing permissions. Denying it stays possible. */
+export function approveOnComputer(
+  caps: Capabilities,
+  harness: string | null | undefined,
+  permissionMode: string | null | undefined,
+  prompt: Pick<ChatPrompt, "kind" | "nativeId">,
+): boolean {
+  return (
+    !caps.endTurnApprovals &&
+    prompt.kind === "permission" &&
+    !prompt.nativeId &&
+    harness === "claude-code" &&
+    permissionMode !== "bypassPermissions"
+  );
 }
 
 /** The composer's built-in commands this connection can't run. */
@@ -86,5 +111,7 @@ export function capabilities(runtime: RuntimeInfo): Capabilities {
     archiveExperiment: local,
     remoteHosts: local,
     tunnelSettings: local,
+    planResumeModes: local,
+    endTurnApprovals: local,
   };
 }

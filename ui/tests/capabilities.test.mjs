@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { capabilities, hiddenComposerCommands } from "../src/capabilities.ts";
+import { approveOnComputer, capabilities, hiddenComposerCommands } from "../src/capabilities.ts";
 
 const local = { kind: "local", version: "1.0.0" };
 const tunnel = { kind: "local", version: "1.0.0", tunnelAccess: true };
@@ -64,4 +64,30 @@ test("Tunnel access hides what the allowlist refuses", () => {
 test("Tunnel access drops the composer commands whose actions it refuses", () => {
   assert.deepEqual(hiddenComposerCommands(capabilities(tunnel)).sort(), ["compact", "goal", "resume", "side"]);
   assert.deepEqual(hiddenComposerCommands(capabilities(local)), []);
+});
+
+test("over Tunnel access an end-turn Claude approval is left to the computer", () => {
+  const endTurn = { kind: "permission", resolved: false };
+  const live = { kind: "permission", resolved: false, nativeId: "perm_1" };
+  const tunnelCaps = capabilities(tunnel);
+  // Claude only grants it by resuming under bypassPermissions.
+  assert.equal(approveOnComputer(tunnelCaps, "claude-code", "acceptEdits", endTurn), true);
+  assert.equal(approveOnComputer(tunnelCaps, "claude-code", null, endTurn), true);
+  // Already bypassing: nothing loosens.
+  assert.equal(approveOnComputer(tunnelCaps, "claude-code", "bypassPermissions", endTurn), false);
+  // A live bridged approval grants just that call.
+  assert.equal(approveOnComputer(tunnelCaps, "claude-code", "manual", live), false);
+  // Other harnesses reply inline.
+  assert.equal(approveOnComputer(tunnelCaps, "codex", "ask", endTurn), false);
+  assert.equal(
+    approveOnComputer(tunnelCaps, "claude-code", "manual", { kind: "question", resolved: false }),
+    false,
+  );
+  // Locally every approval stays here.
+  assert.equal(approveOnComputer(capabilities(local), "claude-code", "manual", endTurn), false);
+});
+
+test("over Tunnel access a plan approval leaves the resume mode to the server", () => {
+  assert.equal(capabilities(tunnel).planResumeModes, false);
+  assert.equal(capabilities(local).planResumeModes, true);
 });
