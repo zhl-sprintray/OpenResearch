@@ -50,6 +50,7 @@ use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
 mod harness_setup;
+mod devices;
 mod tunnel;
 use compute_settings::*;
 
@@ -132,6 +133,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        tunnel_devices: Arc::new(devices::TunnelDevices::new(None)),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -415,6 +417,8 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    /// Devices paired for Tunnel access and outstanding pairing codes.
+    tunnel_devices: Arc<devices::TunnelDevices>,
 }
 
 async fn project_publication_lock(
@@ -818,6 +822,18 @@ fn routes() -> RouteTable {
     .route("/api/internal/permissions", post(bridge_permission))
     .route("/api/chat/attachments/{name}", get(chat_attachment))
     .route("/api/agent/status", get(agent_status))
+    .route(
+        "/api/tunnel/pairing-codes",
+        post(devices::mint_pairing_code),
+    )
+    .route(
+        "/api/tunnel/devices",
+        get(devices::list_devices).delete(devices::revoke_all_devices),
+    )
+    .route(
+        "/api/tunnel/devices/{id}",
+        axum::routing::patch(devices::rename_device).delete(devices::revoke_device),
+    )
 }
 
 /// Routes plus SPA fallback over the shared state, before any listener's guards.
@@ -8222,6 +8238,9 @@ mod tests {
             stopping: Arc::new(AtomicBool::new(false)),
             dashboard_lock: Arc::new(std::sync::Mutex::new(None)),
             restart: Arc::new(tokio::sync::Notify::new()),
+            tunnel_devices: Arc::new(devices::TunnelDevices::new(Some(
+                std::env::temp_dir().join(format!("orx-tunnel-devices-{}", uuid::Uuid::new_v4())),
+            ))),
         }
     }
 

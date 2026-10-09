@@ -3131,6 +3131,18 @@ impl Store {
         Ok(Some(device))
     }
 
+    pub fn tunnel_device_exists(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM tunnel_devices WHERE id = ?1",
+                params![id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn rename_tunnel_device(&self, id: &str, name: &str) -> Result<bool> {
         Ok(self.conn.execute(
             "UPDATE tunnel_devices SET name = ?2 WHERE id = ?1",
