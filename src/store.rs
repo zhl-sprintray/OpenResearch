@@ -653,6 +653,13 @@ impl Store {
                 root       TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (project_id, tex_path)
             );
+            CREATE TABLE IF NOT EXISTS tunnel_devices (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                token_hash   TEXT NOT NULL UNIQUE,
+                paired_at    INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -3062,6 +3069,106 @@ impl Store {
         Ok(())
     }
 
+    /// Records a device paired for Tunnel access. Only the hash of its cookie
+    /// token is kept, so a copied database cannot impersonate the device.
+    pub fn insert_tunnel_device(
+        &self,
+        id: &str,
+        name: &str,
+        token_hash: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO tunnel_devices (id, name, token_hash, paired_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, name, token_hash, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Paired devices still within their sliding expiry, most recently paired
+    /// first. Expired devices are pruned on the way.
+    pub fn list_tunnel_devices(&self, now_ms: i64) -> Result<Vec<TunnelDevice>> {
+        self.prune_tunnel_devices(now_ms)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, paired_at, last_seen_at FROM tunnel_devices
+             ORDER BY paired_at DESC, id",
+        )?;
+        let devices = stmt
+            .query_map([], tunnel_device_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(devices)
+    }
+
+    /// The live device whose cookie token hashes to `token_hash`. Each use
+    /// slides its 30-day expiry; `last_seen_at` is rewritten at most once a
+    /// minute so every request does not cost a write.
+    pub fn authenticate_tunnel_device(
+        &self,
+        token_hash: &str,
+        now_ms: i64,
+    ) -> Result<Option<TunnelDevice>> {
+        self.prune_tunnel_devices(now_ms)?;
+        let device = self
+            .conn
+            .query_row(
+                "SELECT id, name, paired_at, last_seen_at FROM tunnel_devices
+                 WHERE token_hash = ?1",
+                params![token_hash],
+                tunnel_device_row,
+            )
+            .optional()?;
+        let Some(mut device) = device else {
+            return Ok(None);
+        };
+        if now_ms - device.last_seen_at >= TUNNEL_DEVICE_SEEN_GRANULARITY_MS {
+            self.conn.execute(
+                "UPDATE tunnel_devices SET last_seen_at = ?2 WHERE id = ?1",
+                params![device.id, now_ms],
+            )?;
+            device.last_seen_at = now_ms;
+        }
+        Ok(Some(device))
+    }
+
+    pub fn tunnel_device_exists(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM tunnel_devices WHERE id = ?1",
+                params![id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn rename_tunnel_device(&self, id: &str, name: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE tunnel_devices SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )? > 0)
+    }
+
+    pub fn delete_tunnel_device(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM tunnel_devices WHERE id = ?1", params![id])?
+            > 0)
+    }
+
+    pub fn delete_all_tunnel_devices(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM tunnel_devices", [])?)
+    }
+
+    fn prune_tunnel_devices(&self, now_ms: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM tunnel_devices WHERE last_seen_at < ?1",
+            params![now_ms - TUNNEL_DEVICE_TTL_MS],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_ssh_host_test(&self, t: &SshHostTest) -> Result<()> {
         self.conn.execute(
             "INSERT INTO ssh_host_tests (host, reachable, git_found, tools_found, missing_tools, error, tested_at)
@@ -3425,6 +3532,30 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlit
     })
 }
 
+/// A paired device's sliding expiry: 30 days without use.
+const TUNNEL_DEVICE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// How stale `last_seen_at` may get before a use rewrites it.
+const TUNNEL_DEVICE_SEEN_GRANULARITY_MS: i64 = 60 * 1000;
+
+/// A device paired for Tunnel access (its token hash never leaves the store).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelDevice {
+    pub id: String,
+    pub name: String,
+    pub paired_at: i64,
+    pub last_seen_at: i64,
+}
+
+fn tunnel_device_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TunnelDevice> {
+    Ok(TunnelDevice {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        paired_at: row.get(2)?,
+        last_seen_at: row.get(3)?,
+    })
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3470,6 +3601,101 @@ mod tests {
         std::fs::write(config_dir.join("locks"), "not a directory").unwrap();
         assert!(open_lifecycle_lock_in(&config_dir).is_ok());
         std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn tunnel_devices_store_only_token_hashes_and_slide_their_expiry() {
+        let dir = std::env::temp_dir().join(format!("orx-devices-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let day = 24 * 60 * 60 * 1000;
+        store
+            .insert_tunnel_device("d1", "iPhone · Safari", "hash-1", 1_000)
+            .unwrap();
+        store
+            .insert_tunnel_device("d2", "iPad · Safari", "hash-2", 2_000)
+            .unwrap();
+
+        let devices = store.list_tunnel_devices(2_000).unwrap();
+        assert_eq!(
+            devices
+                .iter()
+                .map(|d| (d.id.as_str(), d.name.as_str(), d.paired_at, d.last_seen_at))
+                .collect::<Vec<_>>(),
+            [
+                ("d2", "iPad · Safari", 2_000, 2_000),
+                ("d1", "iPhone · Safari", 1_000, 1_000),
+            ]
+        );
+        let raw: String = store
+            .conn
+            .query_row(
+                "SELECT token_hash FROM tunnel_devices WHERE id = 'd1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "hash-1");
+
+        // Unknown tokens authenticate nothing.
+        assert!(store
+            .authenticate_tunnel_device("nope", 3_000)
+            .unwrap()
+            .is_none());
+        // Use within a minute of the last write does not rewrite last_seen.
+        let seen = store
+            .authenticate_tunnel_device("hash-1", 30_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!((seen.id.as_str(), seen.last_seen_at), ("d1", 1_000));
+        // A later use slides the 30-day window forward.
+        let later = 29 * day;
+        let seen = store
+            .authenticate_tunnel_device("hash-1", later)
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen.last_seen_at, later);
+        assert!(store
+            .authenticate_tunnel_device("hash-1", later + 29 * day)
+            .unwrap()
+            .is_some());
+        // d2 was never used again: past 30 days it is gone.
+        assert!(store
+            .authenticate_tunnel_device("hash-2", 2_000 + 30 * day + 1)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .list_tunnel_devices(later)
+                .unwrap()
+                .iter()
+                .map(|d| d.id.as_str())
+                .collect::<Vec<_>>(),
+            ["d1"]
+        );
+
+        assert!(store.rename_tunnel_device("d1", "My phone").unwrap());
+        assert!(!store.rename_tunnel_device("missing", "x").unwrap());
+        assert_eq!(
+            store.list_tunnel_devices(later).unwrap()[0].name,
+            "My phone"
+        );
+
+        assert!(store.delete_tunnel_device("d1").unwrap());
+        assert!(!store.delete_tunnel_device("d1").unwrap());
+        assert!(store
+            .authenticate_tunnel_device("hash-1", later)
+            .unwrap()
+            .is_none());
+
+        store
+            .insert_tunnel_device("d3", "a", "hash-3", later)
+            .unwrap();
+        store
+            .insert_tunnel_device("d4", "b", "hash-4", later)
+            .unwrap();
+        assert_eq!(store.delete_all_tunnel_devices().unwrap(), 2);
+        assert!(store.list_tunnel_devices(later).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
