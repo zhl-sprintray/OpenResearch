@@ -50,6 +50,7 @@ use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
 mod harness_setup;
+mod tailscale;
 mod tunnel;
 mod tunnel_access;
 use compute_settings::*;
@@ -58,11 +59,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
     updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
-    let tunnel_origin = args
-        .tunnel_origin
-        .as_deref()
-        .map(tunnel::TunnelOrigin::new)
-        .transpose()?;
     let remote_auth = if persistent_host {
         let callback = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         local::chat::set_up_auth_token(callback.clone());
@@ -116,6 +112,26 @@ pub async fn run(args: UpArgs) -> Result<()> {
     codex.start_reaper();
     let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
     let stopping = Arc::new(AtomicBool::new(false));
+    let tunnel_access = tunnel_access::TunnelAccessControl::new(
+        Arc::new(tailscale::TailscaleServe),
+        crate::config::config_dir(),
+    )
+    .held_by(format!(
+        "{} (dashboard http://127.0.0.1:{actual_port}, process {})",
+        if args.desktop_app {
+            "the OpenResearch desktop app"
+        } else {
+            "orx up"
+        },
+        std::process::id()
+    ));
+    let tunnel_access = if persistent_host {
+        tunnel_access.blocked(tunnel_access::Blocked::Remote)
+    } else if args.tunnel_access == Some(crate::TunnelAccessFlag::Never) {
+        tunnel_access.blocked(tunnel_access::Blocked::DevSlot)
+    } else {
+        tunnel_access
+    };
     let state = AppState {
         agent: agent.clone(),
         chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
@@ -133,6 +149,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        tunnel_access,
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -200,14 +217,17 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }));
 
     let app = router(state.clone(), remote_auth.clone());
-    let _tunnel_port = match tunnel_origin {
-        Some(origin) => {
-            let tunnel_port = tunnel::open_tunnel_port(state.clone(), origin).await?;
-            eprintln!("orx up: Tunnel port on 127.0.0.1:{}", tunnel_port.port());
-            Some(tunnel_port)
-        }
-        None => None,
-    };
+    {
+        let state = state.clone();
+        let override_enabled = match args.tunnel_access {
+            Some(crate::TunnelAccessFlag::On) => Some(true),
+            Some(crate::TunnelAccessFlag::Off | crate::TunnelAccessFlag::Never) => Some(false),
+            None => None,
+        };
+        tokio::spawn(async move {
+            state.tunnel_access.restore(&state, override_enabled).await;
+        });
+    }
     let url = format!("http://127.0.0.1:{actual_port}");
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let control_server = if persistent_host {
@@ -285,6 +305,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if explicit_stop {
         state.chat.interrupt_all().await;
     }
+    state.tunnel_access.shutdown().await;
     state.remote_sessions.shutdown().await;
     agent.shutdown().await;
     codex.shutdown().await;
@@ -416,6 +437,7 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    tunnel_access: tunnel_access::TunnelAccessControl,
 }
 
 async fn project_publication_lock(
@@ -819,6 +841,10 @@ fn routes() -> RouteTable {
     .route("/api/internal/permissions", post(bridge_permission))
     .route("/api/chat/attachments/{name}", get(chat_attachment))
     .route("/api/agent/status", get(agent_status))
+    .route(
+        "/api/tunnel/access",
+        get(tunnel_access::get_tunnel_access).put(tunnel_access::set_tunnel_access),
+    )
 }
 
 /// Routes plus SPA fallback over the shared state, before any listener's guards.
@@ -8223,6 +8249,10 @@ mod tests {
             stopping: Arc::new(AtomicBool::new(false)),
             dashboard_lock: Arc::new(std::sync::Mutex::new(None)),
             restart: Arc::new(tokio::sync::Notify::new()),
+            tunnel_access: tunnel_access::TunnelAccessControl::new(
+                Arc::new(tailscale::TailscaleServe),
+                std::env::temp_dir().join(format!("orx-test-config-{}", uuid::Uuid::new_v4())),
+            ),
         }
     }
 

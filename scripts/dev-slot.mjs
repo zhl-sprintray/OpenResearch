@@ -126,6 +126,11 @@ export function slotEnvironment(slotPaths) {
   }
 }
 
+// A dev slot never exposes itself over Tunnel access, whatever its config says.
+export function backendUpArgs(port) {
+  return ['up', '--no-browser', '--tunnel-access', 'never', '--port', String(port)]
+}
+
 function atomicWriteJson(destination, value, mode = 0o600) {
   mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 })
   const temporary = `${destination}.tmp-${process.pid}-${Date.now()}`
@@ -343,7 +348,7 @@ function configurationFor(info, slotPaths) {
       runtimeArgs: [
         ...Object.entries(slotEnvironment(slotPaths)).map(([key, value]) => `${key}=${value}`),
         'cargo', 'run', '--manifest-path', info.manifestPath,
-        '--', 'up', '--no-browser', '--port', String(slotPaths.backendPort),
+        '--', ...backendUpArgs(slotPaths.backendPort),
       ],
       port: slotPaths.backendPort,
     },
@@ -615,7 +620,7 @@ async function startUnlocked(info, dbMode, openBrowser) {
     console.log(`Starting ${slotPaths.slotKey} backend; log: ${state.backendLog}`)
     state.backendProcess = spawnSupervised('cargo', [
       'run', '--manifest-path', info.manifestPath,
-      '--', 'up', '--no-browser', '--port', String(slotPaths.backendPort),
+      '--', ...backendUpArgs(slotPaths.backendPort),
     ], {
       cwd: info.worktreePath,
       env: {

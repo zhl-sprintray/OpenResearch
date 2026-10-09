@@ -10,9 +10,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::tunnel::{open_tunnel_port, TunnelOrigin, TunnelPort};
-use super::AppState;
+use super::{ApiError, AppState};
 use crate::commands::remote_host::DashboardLock;
 use crate::error::{anyhow, Result};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::Json;
 
 /// What a provider reports before it is started.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -467,6 +470,35 @@ fn idle_status(availability: &Availability) -> TunnelStatus {
 
 const PROVIDER_NAME: &str = "tailscale";
 
+/// `GET /api/tunnel/access` (original port only): whether Tunnel access is
+/// on, and what the provider reports.
+pub(super) async fn get_tunnel_access(State(state): State<AppState>) -> Json<TunnelStatus> {
+    Json(state.tunnel_access.status().await)
+}
+
+#[derive(Deserialize)]
+pub(super) struct SetTunnelAccess {
+    enabled: bool,
+}
+
+/// `PUT /api/tunnel/access` (original port only): turns Tunnel access on or
+/// off and saves the choice. A refusal is a 409 carrying the reason.
+pub(super) async fn set_tunnel_access(
+    State(state): State<AppState>,
+    Json(request): Json<SetTunnelAccess>,
+) -> std::result::Result<Json<TunnelStatus>, ApiError> {
+    let control = state.tunnel_access.clone();
+    let status = if request.enabled {
+        control
+            .enable(&state)
+            .await
+            .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?
+    } else {
+        control.disable().await?
+    };
+    Ok(Json(status))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +809,78 @@ mod tests {
             assert_eq!(status.blocked, Some(blocked));
             assert!(provider.starts().is_empty());
         }
+    }
+
+    /// The original port's router over `state`, served on 127.0.0.1:0.
+    async fn dashboard(state: AppState) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = super::super::router(state, None);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    #[tokio::test]
+    async fn the_desktop_dashboard_reads_and_switches_tunnel_access() {
+        let provider = FakeProvider::ready();
+        let mut state = state();
+        state.tunnel_access = control(provider.clone());
+        let url = dashboard(state).await;
+        let client = crate::net::loopback_client().build().unwrap();
+        let endpoint = format!("{url}/api/tunnel/access");
+
+        let status: serde_json::Value = client
+            .get(&endpoint)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["state"], "ready");
+        assert_eq!(status["origin"], ORIGIN);
+
+        let enabled: serde_json::Value = client
+            .put(&endpoint)
+            .json(&serde_json::json!({ "enabled": true }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(enabled["enabled"], true);
+        assert_eq!(enabled["state"], "connected");
+        assert_eq!(provider.starts().len(), 1);
+
+        let disabled = client
+            .put(&endpoint)
+            .json(&serde_json::json!({ "enabled": false }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(disabled.status(), 200);
+        assert_eq!(provider.stops(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_enable_answers_with_the_reason() {
+        let mut state = state();
+        state.tunnel_access = control(FakeProvider::with(Availability::LoggedOut {
+            message: "Log in to Tailscale".into(),
+        }));
+        let url = dashboard(state).await;
+        let response = crate::net::loopback_client()
+            .build()
+            .unwrap()
+            .put(format!("{url}/api/tunnel/access"))
+            .json(&serde_json::json!({ "enabled": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 409);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"], "Log in to Tailscale");
     }
 }

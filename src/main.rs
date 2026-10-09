@@ -667,18 +667,22 @@ pub struct UpArgs {
     /// Internal persistent dashboard/agent-host mode.
     #[arg(long, hide = true)]
     pub remote_host: bool,
-    /// Development only: open the Tunnel port for a tunnel already pointed at
-    /// it, whose public https origin this is. No provider, no pairing yet.
-    #[arg(
-        long,
-        hide = true,
-        value_name = "HTTPS_ORIGIN",
-        conflicts_with_all = ["remote", "remote_host"]
-    )]
-    pub tunnel_origin: Option<String>,
+    /// Turn Tunnel access on or off for this run only, overriding the saved
+    /// setting from the dashboard's settings.
+    #[arg(long, value_enum, value_name = "on|off", conflicts_with_all = ["remote", "remote_host"])]
+    pub tunnel_access: Option<TunnelAccessFlag>,
     /// Serving the desktop app's window, which only restarts when asked.
     #[arg(skip)]
     pub desktop_app: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunnelAccessFlag {
+    On,
+    Off,
+    /// Off, and refuse to turn it on during this run (dev slots).
+    #[value(hide = true)]
+    Never,
 }
 
 #[derive(Args, Clone, Debug)]

@@ -220,7 +220,8 @@ fn classify(method: &Method, route: &str) -> Option<TunnelRoute> {
             | "/api/local-models/{id}"
             | "/api/user-skills"
             | "/api/latex-templates"
-            | "/api/internal/permissions",
+            | "/api/internal/permissions"
+            | "/api/tunnel/access",
         ) => Some(Deny),
         _ => None,
     }
