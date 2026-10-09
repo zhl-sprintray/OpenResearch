@@ -7,6 +7,7 @@ import { capabilities } from "./capabilities";
 import { ChatPanel } from "./components/ChatPanel";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { StatusBadge } from "./components/StatusBadge";
+import { TunnelAccessBadge } from "./components/TunnelAccessBadge";
 import { Button, IconButton, Spinner } from "./components/ui";
 import { cn } from "./components/ui/cn";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
@@ -120,6 +121,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
     <div ref={shellRef} className="mobile-shell relative flex h-full w-full flex-col overflow-hidden bg-background text-text" style={viewportStyle}>
       {runtime.kind === "local" && <OfflineBanner compact />}
       {runtime.kind === "local" && caps.updates && <UpdateBanner status={updateStatus} compact />}
+      {runtime.kind === "local" && caps.tunnelSettings && <TunnelAccessBadge compact />}
       <header className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-2">
         <IconButton className="relative" aria-label={m.mobile_menu()} onClick={() => dispatch({ type: "openDrawer" })}>
           <Menu size={18} />
