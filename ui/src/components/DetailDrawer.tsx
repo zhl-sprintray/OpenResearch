@@ -40,7 +40,7 @@ export function DetailDrawer({
   onSelectRun: (id: string | null) => void;
   parentExperiment: Experiment | null;
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
-  onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
+  onOpenCode?: (view: CodeView, intent: TabOpenIntent) => void;
 }) {
   const expRuns = runs
     .filter((r) => r.experimentId === experiment.id)
@@ -54,7 +54,7 @@ export function DetailDrawer({
         project={project}
         runs={expRuns}
         onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
-        onOpenCode={(intent) => onOpenCode("files", intent)}
+        onOpenCode={onOpenCode && ((intent) => onOpenCode("files", intent))}
      />
     );
   }

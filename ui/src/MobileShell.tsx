@@ -3,6 +3,7 @@ import { useRouter } from "@tanstack/react-router";
 import { ArrowLeft, ChevronDown, ChevronRight, FlaskConical, Menu, Monitor, Package, Plus, SquarePen } from "lucide-react";
 import { useCallback, useReducer, useRef, useState } from "react";
 import { DEFAULT_AUTONOMY, timeAgo, updateUiState, type AgentSelection, type Autonomy, type ChatSession, type Project, type RuntimeInfo, type UiState } from "./api";
+import { capabilities } from "./capabilities";
 import { ChatPanel } from "./components/ChatPanel";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { StatusBadge } from "./components/StatusBadge";
@@ -39,7 +40,8 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
   const router = useRouter();
   const [nav, dispatch] = useReducer(mobileNavReducer, initialMobileNav);
   const viewportStyle = useVisualViewportStyle();
-  const { status: updateStatus } = useUpdateStatus(runtime.kind === "local");
+  const caps = capabilities(runtime);
+  const { status: updateStatus } = useUpdateStatus(runtime.kind === "local" && caps.updates);
   const projectsQuery = useQuery(listProjectsQuery());
   const { data: activity = [] } = useQuery(listProjectActivityQuery());
   const uiStateOptions = getUiStateQuery();
@@ -98,8 +100,17 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
     onMutate: (body) => setScopedQueryData(uiStateOptions.queryKey, (current: UiState | undefined) => current && { ...current, ...body }),
     onSettled: () => void queryClient.invalidateQueries({ queryKey: uiStateOptions.queryKey }),
   });
-  const persistPreferredAgent = useCallback(async (selection: AgentSelection) => { await saveUiState.mutateAsync({ preferredAgent: selection }); }, [saveUiState]);
-  const persistPreferredAutonomy = useCallback((autonomy: Autonomy) => { saveUiState.mutate({ preferredAutonomy: autonomy }); }, [saveUiState]);
+  // Without UI-state writes (Tunnel access) a choice lasts for this page only:
+  // update the cached UI state and skip the save.
+  const keepUiState = useCallback((body: Partial<UiState>) => setScopedQueryData(uiStateOptions.queryKey, (current: UiState | undefined) => current && { ...current, ...body }), [uiStateOptions.queryKey]);
+  const persistPreferredAgent = useCallback(async (selection: AgentSelection) => {
+    if (caps.saveUiState) await saveUiState.mutateAsync({ preferredAgent: selection });
+    else keepUiState({ preferredAgent: selection });
+  }, [saveUiState, keepUiState, caps.saveUiState]);
+  const persistPreferredAutonomy = useCallback((autonomy: Autonomy) => {
+    if (caps.saveUiState) saveUiState.mutate({ preferredAutonomy: autonomy });
+    else keepUiState({ preferredAutonomy: autonomy });
+  }, [saveUiState, keepUiState, caps.saveUiState]);
 
   const sessionsError = sessionsByProject.get(projectId)?.error;
   const contentError = !currentSessions && sessionsError ? sessionsError.message
@@ -108,7 +119,7 @@ export function MobileShell({ projectId, sessionId, pane, view, runtime }: {
   return (
     <div ref={shellRef} className="mobile-shell relative flex h-full w-full flex-col overflow-hidden bg-background text-text" style={viewportStyle}>
       {runtime.kind === "local" && <OfflineBanner compact />}
-      {runtime.kind === "local" && <UpdateBanner status={updateStatus} compact />}
+      {runtime.kind === "local" && caps.updates && <UpdateBanner status={updateStatus} compact />}
       <header className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-2">
         <IconButton className="relative" aria-label={m.mobile_menu()} onClick={() => dispatch({ type: "openDrawer" })}>
           <Menu size={18} />

@@ -11,7 +11,7 @@ function deleteExplanation(project: Project) {
   return `${m.projects_delete_from_app({ name: project.name })}\n\n${synced ? m.projects_home_local_and_github_kept() : m.projects_home_local_folder_kept()}`;
 }
 
-export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleCollapsed, onRemoved, onNewChat, pinned, onPin }: {
+export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleCollapsed, onRemoved, onNewChat, pinned, onPin, manageable = true }: {
   project: Project;
   chatCount: number | undefined;
   collapsed: boolean;
@@ -21,6 +21,8 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   onNewChat: () => void;
   pinned: boolean;
   onPin: () => void;
+  /** False where this connection can't edit, reveal or delete the project. */
+  manageable?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -96,6 +98,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
         <div className="mt-2 break-all text-xs text-subtext">{project.repoPath}</div>
       </div>
       <MenuItem role="menuitem" onClick={() => { onPin(); menuRef.current?.hidePopover(); }}><span className="flex items-center gap-2"><Pin size={16} />{pinned ? m.sidebar_unpin_project() : m.sidebar_pin_project()}</span></MenuItem>
+      {manageable && <>
       <MenuItem role="menuitem" onClick={edit}><span className="flex items-center gap-2"><Settings size={16} />{m.activity_edit()}</span></MenuItem>
       <MenuItem role="menuitem" onClick={() => {
         menuRef.current?.hidePopover();
@@ -103,6 +106,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
       }}><span className="flex items-center gap-2"><FolderOpen size={16} />{m.sidebar_reveal_project()}</span></MenuItem>
       <div className="my-1 border-t border-border" />
       <MenuItem role="menuitem" danger disabled={deleting} onClick={() => void remove()}><span className="flex items-center gap-2"><Trash2 size={16} />{m.projects_home_delete_project_action()}</span></MenuItem>
+      </>}
     </div>
     {editing && createPortal(<EditProjectDialog project={project} onClose={() => setEditing(false)} onRemoved={onRemoved} />, document.body)}
   </>;

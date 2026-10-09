@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { capabilities } from "../src/capabilities.ts";
+import { capabilities, hiddenComposerCommands } from "../src/capabilities.ts";
 
 const local = { kind: "local", version: "1.0.0" };
 const tunnel = { kind: "local", version: "1.0.0", tunnelAccess: true };
@@ -39,6 +39,7 @@ test("Tunnel access hides what the allowlist refuses", () => {
     "terminal",
     "shell",
     "codeFiles",
+    "editArtifacts",
     "settings",
     "projectCreate",
     "projectDelete",
@@ -51,10 +52,16 @@ test("Tunnel access hides what the allowlist refuses", () => {
     "compact",
     "fork",
     "sideChat",
+    "importChats",
     "archiveExperiment",
     "remoteHosts",
     "tunnelSettings",
   ]) {
     assert.equal(caps[denied], false, denied);
   }
+});
+
+test("Tunnel access drops the composer commands whose actions it refuses", () => {
+  assert.deepEqual(hiddenComposerCommands(capabilities(tunnel)).sort(), ["compact", "goal", "resume", "side"]);
+  assert.deepEqual(hiddenComposerCommands(capabilities(local)), []);
 });

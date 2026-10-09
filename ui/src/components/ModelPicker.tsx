@@ -162,7 +162,8 @@ export function ModelPicker({
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
-  onOpenSettings: () => void;
+  /** Absent where this connection has no settings page. */
+  onOpenSettings?: () => void;
   permissionChoices?: OptionChoice[];
   defaultPermissionId?: string | null;
   onSelectPermission?: (id: string) => void;
@@ -306,7 +307,7 @@ export function ModelPicker({
         <ChevronLeft size={15} />
       </IconButton>
       <span className="min-w-0 flex-1 text-sm font-medium text-text">{title}</span>
-      {page === "models" && (
+      {page === "models" && onOpenSettings && (
         <IconButton
           type="button"
           size="small"

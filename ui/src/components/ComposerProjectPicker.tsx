@@ -10,7 +10,7 @@ export function ComposerProjectPicker({ projects, activity, projectId, projectNa
   projectId: string;
   projectName: string;
   onSelect: (id: string) => void;
-  onNewProject: () => void;
+  onNewProject?: () => void;
 }) {
   const { open, setOpen, ref } = usePopover();
   const lastActivity = new Map(activity.map((row) => [row.projectId, row.lastActivityAt]));
@@ -26,8 +26,8 @@ export function ComposerProjectPicker({ projects, activity, projectId, projectNa
           <span className="truncate">{project.name}</span>{project.id === projectId && <Check size={13} className="shrink-0" />}
         </MenuItem>)}
       </div>
-      <div className="mb-1 border-t border-border" />
-      <MenuItem role="menuitem" size="compact" className="text-sm" onClick={() => { setOpen(false); onNewProject(); }}><span className="flex items-center gap-2"><Plus size={14} />{m.projects_home_new_project()}</span></MenuItem>
+      {onNewProject && <><div className="mb-1 border-t border-border" />
+      <MenuItem role="menuitem" size="compact" className="text-sm" onClick={() => { setOpen(false); onNewProject(); }}><span className="flex items-center gap-2"><Plus size={14} />{m.projects_home_new_project()}</span></MenuItem></>}
     </div>}
   </div>;
 }

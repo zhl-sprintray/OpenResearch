@@ -123,6 +123,7 @@ import {
   type StarterPrompt,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
+import { capabilities, hiddenComposerCommands } from "../capabilities";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   splitTurnParts,
@@ -2895,7 +2896,8 @@ function ForkControls({
   nextId?: string;
   onSelect: (leafId: string) => void;
   pagerDisabled: boolean;
-  onEdit: () => void;
+  /** Absent where this connection can't fork. */
+  onEdit?: () => void;
   editDisabled: boolean;
 }) {
   const many = count > 1;
@@ -2938,14 +2940,14 @@ function ForkControls({
           <Copy size={13} />
         </IconButton>
       </div>
-      <IconButton size="small"
+      {onEdit && <IconButton size="small"
         title={m.chat_panel_edit_and_re_send()}
         aria-label={m.chat_panel_edit_and_re_send()}
         disabled={editDisabled}
         onClick={onEdit}
       >
         <Pencil size={13} />
-      </IconButton>
+      </IconButton>}
     </div>
   );
 }
@@ -3006,8 +3008,8 @@ const Message = memo(function Message({
   /** Paging between forks is a read-only pointer move, so it stays available
    * when editing does not (an unavailable harness still has branches to read). */
   branchDisabled: boolean;
-  onFork: (messageId: string, text: string) => void;
-  onSelectFork: (leafId: string) => void;
+  onFork?: (messageId: string, text: string) => void;
+  onSelectFork?: (leafId: string) => void;
 }) {
   useLocale();
   // Editing re-asks as a new fork rather than rewriting history, so the original
@@ -3042,7 +3044,7 @@ const Message = memo(function Message({
         // nothing to show for it.
         if (!next || forkDisabled) return;
         setEditDraft(null);
-        onFork(message.id, next);
+        onFork?.(message.id, next);
       };
       return (
         <div className="msg-user-group ms-auto self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
@@ -3116,9 +3118,9 @@ const Message = memo(function Message({
             index={forkIndex}
             prevId={forkPrevId}
             nextId={forkNextId}
-            onSelect={onSelectFork}
-            pagerDisabled={branchDisabled}
-            onEdit={() => setEditDraft(text)}
+            onSelect={onSelectFork ?? (() => {})}
+            pagerDisabled={branchDisabled || !onSelectFork}
+            onEdit={onFork ? () => setEditDraft(text) : undefined}
             editDisabled={forkDisabled}
           />
         )}
@@ -3734,8 +3736,9 @@ const Transcript = memo(function Transcript({
   allMessages: ChatMessage[];
   /** False greys out the edit control (busy turn, harness not ready). */
   canFork: boolean;
-  onFork: (messageId: string, text: string) => void;
-  onSelectFork: (leafId: string) => void;
+  /** Absent where this connection can't fork or switch branches. */
+  onFork?: (messageId: string, text: string) => void;
+  onSelectFork?: (leafId: string) => void;
   busy: boolean;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
@@ -4004,6 +4007,7 @@ function SessionRow({
   onRename,
   onSetArchived,
   onDelete,
+  editable = true,
 }: {
   session: ChatSession;
   active: boolean;
@@ -4019,6 +4023,8 @@ function SessionRow({
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
+  /** False where this connection can't rename, archive or delete sessions. */
+  editable?: boolean;
 }) {
   const { open, setOpen, ref } = usePopover();
   const title = session.title?.trim() || "Untitled";
@@ -4119,7 +4125,7 @@ function SessionRow({
           unread && <span className="unread-dot" />
         )}
       </span>
-      <button
+      {editable && <button
         className="session-menu-btn"
         title={m.chat_panel_session_options()}
         aria-label={m.chat_panel_session_options()}
@@ -4129,7 +4135,7 @@ function SessionRow({
         }}
       >
         <MoreHorizontal size={14} />
-      </button>
+      </button>}
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <MenuItem
@@ -4329,6 +4335,9 @@ export function ChatPanel({
   const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
   const navigate = useNavigate();
+  // What this connection may do (Tunnel access hides most writes).
+  const caps = useMemo(() => capabilities(runtime), [runtime]);
+  const hiddenCommands = useMemo(() => hiddenComposerCommands(caps), [caps]);
   // The Mobile layout's composer (bare = hosted by MobileShell): image-only
   // attachments, no `!` shell, and bottom sheets for model and modes.
   const mobile = bare;
@@ -4660,12 +4669,13 @@ export function ChatPanel({
     : undefined;
   const opts = activeHarness?.options;
   const commands = useMemo(
-    () => commandsForHarness(skills, opts?.planActivation),
-    [skills, opts?.planActivation],
+    () => commandsForHarness(skills, opts?.planActivation, hiddenCommands),
+    [skills, opts?.planActivation, hiddenCommands],
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
-  const shellCommand = mobile ? null : bashCommand(draft);
+  // Neither the Mobile layout nor Tunnel access has the shell.
+  const shellCommand = mobile || !caps.shell ? null : bashCommand(draft);
   const bashMode = shellCommand !== null;
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
@@ -5441,7 +5451,7 @@ export function ChatPanel({
     // skill and supplies this exact message as their shared request context.
     const originalText = draft.trim();
     const composerCommand = !pendingQuestion
-      ? parseComposerCommand(originalText, opts?.planActivation)
+      ? parseComposerCommand(originalText, opts?.planActivation, hiddenCommands)
       : null;
     if (composerCommand && composerCommand.name !== "plan") {
       setDraft(takesArgument(composerCommand.name) ? "" : composerCommand.prompt);
@@ -6198,14 +6208,14 @@ export function ChatPanel({
           <Plus size={15} />
           {m.chat_panel_new_chat()}
         </button>
-        <button
+        {caps.settings && <button
           className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={15} />
           {m.chat_panel_customize()}
-        </button>
-        {SETTINGS_NAV.map((item) => (
+        </button>}
+        {caps.settings && SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
             className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
@@ -6222,7 +6232,7 @@ export function ChatPanel({
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
         <div className="rail-section-actions flex items-center gap-0.5">
-          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+          {onNewProject && caps.projectCreate && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={15} className="text-subtext" />
             </IconButton>
@@ -6275,6 +6285,7 @@ export function ChatPanel({
                         writeSidebarIds("sidebar-pinned-projects", next);
                       }}
                       onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
+                      manageable={caps.projectDelete}
                       onNewChat={() => {
                         if (project.id === projectId) startProjectTask();
                         else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
@@ -6314,6 +6325,7 @@ export function ChatPanel({
                       onRename={(title) => rename(s, title)}
                       onSetArchived={(archived) => setArchived(s, archived)}
                       onDelete={() => void removeSession(s)}
+                      editable={caps.editSession}
                     />
                   </div>
                 ) : row.kind === "more" ? (
@@ -6544,8 +6556,8 @@ export function ChatPanel({
                   messages={messages}
                   allMessages={allMessages}
                   canFork={canFork}
-                  onFork={forkTurn}
-                  onSelectFork={selectBranch}
+                  onFork={caps.fork ? forkTurn : undefined}
+                  onSelectFork={caps.fork ? selectBranch : undefined}
                   busy={busy}
                   onOpenFile={openFileInSession}
                   onOpenRun={onOpenRun}
@@ -6664,7 +6676,7 @@ export function ChatPanel({
                         : m.chat_queued()}
                     </span>
                   )}
-                  {q.dispatchState === "blocked" ? (
+                  {!caps.editQueue ? null : q.dispatchState === "blocked" ? (
                     <>
                       <button
                         onClick={() => void retryQueued(q.id)}
@@ -6761,7 +6773,7 @@ export function ChatPanel({
               activity={projectActivity}
               projectId={projectId}
               projectName={projectName}
-              onNewProject={onNewProject}
+              onNewProject={caps.projectCreate ? onNewProject : undefined}
               onSelect={(id) => {
                 if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
@@ -7013,7 +7025,7 @@ export function ChatPanel({
               >
                 <Paperclip size={16} />
               </IconButton>
-              {sessionGoal && (
+              {sessionGoal && caps.editSession && (
                 <Button
                   type="button"
                   variant="ghost"
@@ -7098,7 +7110,7 @@ export function ChatPanel({
                 <ModelPicker
                   value={composerSelection}
                   onSelect={selectModel}
-                  onOpenSettings={() => onSelectMainView("harnesses")}
+                  onOpenSettings={caps.settings ? () => onSelectMainView("harnesses") : undefined}
                   permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
@@ -7106,7 +7118,7 @@ export function ChatPanel({
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? preferredAutonomy}
-                  onSelectAutonomy={setAutonomy}
+                  onSelectAutonomy={caps.editSession ? setAutonomy : undefined}
                   lockHarness={!!openSession}
                   openRequest={modelPickerRequest}
                 />

@@ -4,6 +4,7 @@ import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@t
 import { useEffect, useState } from "react";
 
 import { useRuntime } from "./RemoteRuntime";
+import { capabilities } from "./capabilities";
 
 import { clearReadDemoSessions } from "./demoSessionState";
 import { globalResumeLocation, projectResumeLocation } from "./routeResume";
@@ -74,7 +75,8 @@ export function ProjectsPage() {
   const onboarding = projects?.length === 0;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
-  const { status } = useUpdateStatus(runtime.kind === "local");
+  const caps = capabilities(runtime);
+  const { status } = useUpdateStatus(runtime.kind === "local" && caps.updates);
   useEffect(() => {
     document.title = "OpenResearch";
   }, []);
@@ -82,11 +84,11 @@ export function ProjectsPage() {
 
   return (
     <div className="app flex flex-col h-full">
-      {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} />{!runtime.tunnelAccess && <TunnelAccessBadge />}</>}
+      {runtime.kind === "local" && <><OfflineBanner />{caps.updates && <UpdateBanner status={status} />}{caps.tunnelSettings && <TunnelAccessBadge />}</>}
       <DesktopAppBanner />
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />
-          : onboarding ? (
+          : onboarding && caps.projectCreate ? (
             <Onboarding
               remote={runtime.kind === "ssh"}
               preferredAgent={state.preferredAgent}

@@ -83,7 +83,8 @@ function writerFor(id: string) {
   return writer;
 }
 
-function save(id: string, location: string, key?: string, task?: TaskWorkspace) {
+/** `persist: false` keeps the change in this page only (no UI-state writes, e.g. over Tunnel access). */
+function save(id: string, location: string, key?: string, task?: TaskWorkspace, persist = true) {
   const previous = projectCache.get(id);
   if (!previous || (key === "new" && newTaskPromotions.has(id))) return;
   const lastLocation = safeLocation(location) ?? previous.lastLocation;
@@ -94,7 +95,7 @@ function save(id: string, location: string, key?: string, task?: TaskWorkspace) 
   const metadataOnly = oldTask && task && lastLocation === previous.lastLocation
     && JSON.stringify({ ...oldTask, scroll: {}, sourceModes: {} }) === JSON.stringify({ ...task, scroll: {}, sourceModes: {} });
   projectCache.set(id, next);
-  writerFor(id).queue(next, metadataOnly ? 250 : 0);
+  if (persist) writerFor(id).queue(next, metadataOnly ? 250 : 0);
 }
 
 interface Props {
@@ -109,6 +110,8 @@ interface Props {
   getScroll: () => TaskWorkspace["scroll"];
   sourceModes: TaskWorkspace["sourceModes"];
   revision: number;
+  /** False keeps workspace changes in this page only. Default true. */
+  persist?: boolean;
 }
 
 interface Committed {
@@ -139,7 +142,7 @@ export function useProjectWorkspace(props: Props): {
   capture: () => void;
   workspace: MutableRefObject<ProjectWorkspace>;
 } {
-  const { projectId, taskKey, location, pane, isTask, firstDemoOpen, state, apply, getScroll, sourceModes, revision } = props;
+  const { projectId, taskKey, location, pane, isTask, firstDemoOpen, state, apply, getScroll, sourceModes, revision, persist = true } = props;
   const workspace = useRef<ProjectWorkspace>(emptyProjectWorkspace());
   const saveError = useSyncExternalStore(subscribeErrors, () => projectId ? saveErrors.get(projectId) ?? null : null);
   const [readError, setReadError] = useState<string | null>(null);
@@ -158,7 +161,7 @@ export function useProjectWorkspace(props: Props): {
     const previous = committed.current;
     if (!previous) return;
     const task = snapshot({ ...latest.current, state: previous.state, pane: previous.pane }, getTaskWorkspace(projectCache.get(previous.projectId), previous.taskKey), previous.projectId, previous.taskKey);
-    save(previous.projectId, previous.location, previous.taskKey, task);
+    save(previous.projectId, previous.location, previous.taskKey, task, latest.current.persist ?? true);
   }, []);
 
   useEffect(() => {
@@ -209,11 +212,11 @@ export function useProjectWorkspace(props: Props): {
       }
     }
     if (isTask) {
-      save(projectId, location, taskKey, snapshot({ state: resolvedState, pane, getScroll, sourceModes }, getTaskWorkspace(document, taskKey), projectId, taskKey));
+      save(projectId, location, taskKey, snapshot({ state: resolvedState, pane, getScroll, sourceModes }, getTaskWorkspace(document, taskKey), projectId, taskKey), persist);
       committed.current = { projectId, taskKey, scope, location, pane, state: resolvedState };
-    } else save(projectId, location);
+    } else save(projectId, location, undefined, undefined, persist);
     workspace.current = projectCache.get(projectId) ?? document;
-  }, [projectId, taskKey, location, pane, paneKey, isTask, firstDemoOpen, state, apply, getScroll, sourceModes, revision, loadedProject, scope, renderedScope, capture]);
+  }, [projectId, taskKey, location, pane, paneKey, isTask, firstDemoOpen, state, apply, getScroll, sourceModes, revision, loadedProject, scope, renderedScope, capture, persist]);
 
   useEffect(() => {
     const visit = epoch;

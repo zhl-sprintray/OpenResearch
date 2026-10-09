@@ -137,7 +137,7 @@ export function ExpHoverCard({
   /** Viewport rect of the hovered node (kept fresh by useHoverIntent). */
   anchor: DOMRect;
   onOpenLogs?: (intent: TabOpenIntent) => void;
-  onOpenCode: (intent: TabOpenIntent) => void;
+  onOpenCode?: (intent: TabOpenIntent) => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -251,13 +251,13 @@ export function ExpHoverCard({
             {m.exp_hover_card_logs()}
           </button>
         )}
-        <button
+        {onOpenCode && <button
           type="button"
           {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
         >
           <FolderTree size={13} />
           {m.exp_hover_card_code()}
-        </button>
+        </button>}
       </div>
       {body && (
         <div className={`hc-body${expanded ? " expanded" : ""}`} ref={bodyRef}>

@@ -5,6 +5,7 @@
  * Mobile layout: any combination of layout and access can occur. */
 
 import type { RuntimeInfo } from "./api";
+import type { ComposerCommandName } from "./composerCommands";
 
 export interface Capabilities {
   /** Browse, send messages (images included), steer, interrupt, answer prompts. */
@@ -19,7 +20,10 @@ export interface Capabilities {
   shell: boolean;
   /** Browse, edit and diff the project's code and working tree, open or reveal files. */
   codeFiles: boolean;
-  /** The settings page: env vars, tokens, data dir, compute, profile. */
+  /** Rename, duplicate and delete artifacts (browsing them stays). */
+  editArtifacts: boolean;
+  /** The settings pages (env vars, tokens, data dir, compute, harness setup,
+   * profile) and Customize (user skills, LaTeX templates). */
   settings: boolean;
   projectCreate: boolean;
   projectDelete: boolean;
@@ -36,11 +40,23 @@ export interface Capabilities {
   compact: boolean;
   fork: boolean;
   sideChat: boolean;
+  /** `/resume`: list and adopt chats from the agents' own CLIs. */
+  importChats: boolean;
   archiveExperiment: boolean;
   /** Start, reconnect or stop Remote hosts. */
   remoteHosts: boolean;
   /** The Tunnel access settings section and its status badge. */
   tunnelSettings: boolean;
+}
+
+/** The composer's built-in commands this connection can't run. */
+export function hiddenComposerCommands(caps: Capabilities): ComposerCommandName[] {
+  const hidden: ComposerCommandName[] = [];
+  if (!caps.editSession) hidden.push("goal");
+  if (!caps.compact) hidden.push("compact");
+  if (!caps.sideChat) hidden.push("side");
+  if (!caps.importChats) hidden.push("resume");
+  return hidden;
 }
 
 export function capabilities(runtime: RuntimeInfo): Capabilities {
@@ -53,6 +69,7 @@ export function capabilities(runtime: RuntimeInfo): Capabilities {
     terminal: local,
     shell: local,
     codeFiles: local,
+    editArtifacts: local,
     settings: local,
     projectCreate: local,
     projectDelete: local,
@@ -65,6 +82,7 @@ export function capabilities(runtime: RuntimeInfo): Capabilities {
     compact: local,
     fork: local,
     sideChat: local,
+    importChats: local,
     archiveExperiment: local,
     remoteHosts: local,
     tunnelSettings: local,

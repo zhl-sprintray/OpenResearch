@@ -55,6 +55,7 @@ for (const corner of [true, false]) {
       "./RemoteIcon": { RemoteIcon: "RemoteIcon" },
       "./SshConfigDialog": { SshConfigDialog: "ConfigDialog" },
       "./ui": { Button: "button", IconButton: "button" },
+      "../capabilities": load("capabilities.ts", {}),
     });
     const runtime = { kind: "local", version: "test" };
     const render = () => { state.reset(); return nodes(WorkspaceConnection({ runtime, corner })); };
@@ -90,6 +91,7 @@ for (const kind of ["local", "ssh"]) {
         "./queries/projects": { listProjectsQuery: () => ({ kind: "projects" }), getUiStateQuery: () => ({ kind: "state" }) },
         "@tanstack/react-router": { useNavigate: () => () => {} },
         "./RemoteRuntime": { useRuntime: () => runtime },
+        "./capabilities": load("capabilities.ts", {}),
         "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {},
         "./paraglide/messages.js": messages,
         "./components/Onboarding": { Onboarding: "Onboarding" },
