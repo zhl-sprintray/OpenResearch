@@ -409,11 +409,12 @@ mod tests {
         let response = client()
             .post(url(&port, PAIR_REDEEM_PATH))
             .header("origin", TUNNEL_ORIGIN)
+            .json(&serde_json::json!({ "code": "unknown" }))
             .send()
             .await
             .unwrap();
-        // Past authentication and the allowlist; the missing body is the
-        // handler's to refuse.
+        // Past authentication and the allowlist: the handler itself refuses
+        // the unknown code.
         assert_eq!(response.status(), 400);
     }
 

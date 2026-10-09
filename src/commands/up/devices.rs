@@ -309,7 +309,10 @@ async fn redeem_pairing_code(
         StatusCode::SEE_OTHER,
         [
             (header::LOCATION, HeaderValue::from_static("/")),
-            (header::SET_COOKIE, HeaderValue::from_str(&cookie).map_err(bad_request)?),
+            (
+                header::SET_COOKIE,
+                HeaderValue::from_str(&cookie).map_err(bad_request)?,
+            ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
         ],
     )
@@ -392,7 +395,11 @@ pub(super) async fn rename_device(
             "A device name needs 1 to {DEVICE_NAME_MAX_CHARS} characters."
         )));
     }
-    if !state.tunnel_devices.store()?.rename_tunnel_device(&id, name)? {
+    if !state
+        .tunnel_devices
+        .store()?
+        .rename_tunnel_device(&id, name)?
+    {
         return Err(not_found("device"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -545,7 +552,9 @@ mod tests {
         assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&cookie)).await, 403);
         assert_eq!(ports.tunnel_get(DENIED_ROUTE, None).await, 401);
         assert_eq!(
-            ports.tunnel_get(DENIED_ROUTE, Some("__Host-orx_device=forged")).await,
+            ports
+                .tunnel_get(DENIED_ROUTE, Some("__Host-orx_device=forged"))
+                .await,
             401
         );
 
@@ -555,5 +564,158 @@ mod tests {
         assert!(devices[0]["pairedAt"].as_i64().is_some());
         assert!(devices[0]["lastSeenAt"].as_i64().is_some());
         assert!(devices[0].get("tokenHash").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pairing_code_works_only_once() {
+        let ports = Ports::open().await;
+        let code = ports.mint_code().await;
+        assert_eq!(ports.redeem(&code).await.status(), 303);
+        let again = ports.redeem(&code).await;
+        assert_eq!(again.status(), 400);
+        assert!(device_cookie(&again).is_none());
+        assert_eq!(ports.redeem("made-up").await.status(), 400);
+        assert_eq!(ports.devices().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_pairing_code_expires_after_five_minutes() {
+        let ports = Ports::open().await;
+        let fresh = ports.mint_code().await;
+        let stale = ports.mint_code().await;
+        ports
+            .state
+            .tunnel_devices
+            .advance_clock(5 * 60 * 1000 - 1_000);
+        assert_eq!(ports.redeem(&fresh).await.status(), 303);
+        ports.state.tunnel_devices.advance_clock(1_000);
+        let response = ports.redeem(&stale).await;
+        assert_eq!(response.status(), 400);
+        assert!(device_cookie(&response).is_none());
+    }
+
+    #[tokio::test]
+    async fn devices_are_managed_only_from_the_original_port() {
+        let ports = Ports::open().await;
+        let cookie = ports.pair().await;
+        for (method, path) in [
+            (Method::POST, "/api/tunnel/pairing-codes"),
+            (Method::GET, "/api/tunnel/devices"),
+            (Method::DELETE, "/api/tunnel/devices"),
+            (Method::PATCH, "/api/tunnel/devices/some-id"),
+            (Method::DELETE, "/api/tunnel/devices/some-id"),
+        ] {
+            let request = |cookie: Option<&str>| {
+                let mut request = client()
+                    .request(method.clone(), ports.tunnel(path))
+                    .header("origin", TUNNEL_ORIGIN);
+                if let Some(cookie) = cookie {
+                    request = request.header("cookie", cookie.to_string());
+                }
+                request
+            };
+            let paired = request(Some(&cookie)).send().await.unwrap();
+            assert_eq!(paired.status(), 403, "{method} {path}");
+            let unpaired = request(None).send().await.unwrap();
+            assert_eq!(unpaired.status(), 401, "{method} {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn revoking_a_device_takes_effect_immediately() {
+        let ports = Ports::open().await;
+        let kept = ports.pair().await;
+        let lost = ports.pair().await;
+        let devices = ports.devices().await;
+        let lost_id = devices[0]["id"].as_str().unwrap();
+        let response = client()
+            .delete(ports.original(&format!("/api/tunnel/devices/{lost_id}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 204);
+        assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&lost)).await, 401);
+        assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&kept)).await, 403);
+
+        let response = client()
+            .delete(ports.original("/api/tunnel/devices"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(ports.tunnel_get(DENIED_ROUTE, Some(&kept)).await, 401);
+        assert!(ports.devices().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_device_can_be_renamed() {
+        let ports = Ports::open().await;
+        ports.pair().await;
+        let id = ports.devices().await[0]["id"].as_str().unwrap().to_string();
+        let rename = |name: &'static str, id: String| {
+            client()
+                .patch(ports.original(&format!("/api/tunnel/devices/{id}")))
+                .json(&serde_json::json!({ "name": name }))
+                .send()
+        };
+        assert_eq!(
+            rename("  My phone ", id.clone()).await.unwrap().status(),
+            204
+        );
+        assert_eq!(ports.devices().await[0]["name"], "My phone");
+        assert_eq!(rename("   ", id).await.unwrap().status(), 400);
+        assert_eq!(rename("x", "missing".into()).await.unwrap().status(), 404);
+    }
+
+    #[tokio::test]
+    async fn pairing_a_device_announces_it_on_the_event_stream() {
+        let ports = Ports::open().await;
+        let mut events = ports.state.chat.subscribe();
+        ports.pair().await;
+        let (name, data) = loop {
+            let event = events.recv().await.unwrap();
+            if event.0 == "tunnel.device_paired" {
+                break event;
+            }
+        };
+        assert_eq!(name, "tunnel.device_paired");
+        assert_eq!(data["name"], "iPhone · Safari");
+        assert_eq!(data["id"], ports.devices().await[0]["id"]);
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_visitor_sees_only_the_pairing_page() {
+        let ports = Ports::open().await;
+        for path in ["/", "/projects/p1"] {
+            let response = client().get(ports.tunnel(path)).send().await.unwrap();
+            assert_eq!(response.status(), 401, "{path}");
+            let body = response.text().await.unwrap();
+            assert!(body.contains("/api/tunnel/pair"), "{path}");
+            assert!(!body.contains("id=\"root\""), "{path}");
+        }
+    }
+
+    #[test]
+    fn device_names_come_from_the_user_agent() {
+        for (user_agent, expected) in [
+            (Some(IPHONE_SAFARI), "iPhone · Safari"),
+            (
+                Some(
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like \
+                     Gecko) Chrome/129.0.0.0 Mobile Safari/537.36",
+                ),
+                "Android phone · Chrome",
+            ),
+            (
+                Some(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+                     (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+                ),
+                "Mac · Safari",
+            ),
+            (None, "Device"),
+        ] {
+            assert_eq!(device_name(user_agent), expected);
+        }
     }
 }

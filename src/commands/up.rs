@@ -49,8 +49,8 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
-mod harness_setup;
 mod devices;
+mod harness_setup;
 mod tunnel;
 use compute_settings::*;
 

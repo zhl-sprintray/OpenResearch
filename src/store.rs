@@ -3628,18 +3628,31 @@ mod tests {
         );
         let raw: String = store
             .conn
-            .query_row("SELECT token_hash FROM tunnel_devices WHERE id = 'd1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT token_hash FROM tunnel_devices WHERE id = 'd1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(raw, "hash-1");
 
         // Unknown tokens authenticate nothing.
-        assert!(store.authenticate_tunnel_device("nope", 3_000).unwrap().is_none());
+        assert!(store
+            .authenticate_tunnel_device("nope", 3_000)
+            .unwrap()
+            .is_none());
         // Use within a minute of the last write does not rewrite last_seen.
-        let seen = store.authenticate_tunnel_device("hash-1", 30_000).unwrap().unwrap();
+        let seen = store
+            .authenticate_tunnel_device("hash-1", 30_000)
+            .unwrap()
+            .unwrap();
         assert_eq!((seen.id.as_str(), seen.last_seen_at), ("d1", 1_000));
         // A later use slides the 30-day window forward.
         let later = 29 * day;
-        let seen = store.authenticate_tunnel_device("hash-1", later).unwrap().unwrap();
+        let seen = store
+            .authenticate_tunnel_device("hash-1", later)
+            .unwrap()
+            .unwrap();
         assert_eq!(seen.last_seen_at, later);
         assert!(store
             .authenticate_tunnel_device("hash-1", later + 29 * day)
@@ -3662,14 +3675,24 @@ mod tests {
 
         assert!(store.rename_tunnel_device("d1", "My phone").unwrap());
         assert!(!store.rename_tunnel_device("missing", "x").unwrap());
-        assert_eq!(store.list_tunnel_devices(later).unwrap()[0].name, "My phone");
+        assert_eq!(
+            store.list_tunnel_devices(later).unwrap()[0].name,
+            "My phone"
+        );
 
         assert!(store.delete_tunnel_device("d1").unwrap());
         assert!(!store.delete_tunnel_device("d1").unwrap());
-        assert!(store.authenticate_tunnel_device("hash-1", later).unwrap().is_none());
+        assert!(store
+            .authenticate_tunnel_device("hash-1", later)
+            .unwrap()
+            .is_none());
 
-        store.insert_tunnel_device("d3", "a", "hash-3", later).unwrap();
-        store.insert_tunnel_device("d4", "b", "hash-4", later).unwrap();
+        store
+            .insert_tunnel_device("d3", "a", "hash-3", later)
+            .unwrap();
+        store
+            .insert_tunnel_device("d4", "b", "hash-4", later)
+            .unwrap();
         assert_eq!(store.delete_all_tunnel_devices().unwrap(), 2);
         assert!(store.list_tunnel_devices(later).unwrap().is_empty());
         std::fs::remove_dir_all(dir).unwrap();
