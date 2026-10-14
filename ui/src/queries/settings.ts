@@ -135,6 +135,23 @@ export const getTelemetryQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+/** Polled: the provider can drop and reconnect with no event announcing it.
+ *  Polling stops on an error (e.g. the 403 this original-port route answers
+ *  over Tunnel access). */
+export const getTunnelAccessQuery = () => queryOptions({
+  queryKey: workspaceKey("getTunnelAccess"),
+  queryFn: ({ signal }) => api.getTunnelAccess(signal),
+  staleTime: 5_000,
+  refetchInterval: (query) => (query.state.error ? false : 15_000),
+  retry: false,
+});
+
+export const listTunnelDevicesQuery = () => queryOptions({
+  queryKey: workspaceKey("listTunnelDevices"),
+  queryFn: ({ signal }) => api.listTunnelDevices(signal),
+  staleTime: 30_000,
+});
+
 export const getHarnessSetupCommandsQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnessSetupCommands"),
   queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),
@@ -185,13 +202,16 @@ export async function refreshHarnesses(refresh = false, retryRejected = false) {
   return fetchHarnesses(refresh, retryRejected);
 }
 
+/** Re-check one harness without waiting on the others' probes. */
+export const refreshHarness = (harness: api.HarnessId) => fetchHarnesses(true, false, harness);
+
 /** The server's cached answer, skipping any in-flight poll that may predate a publish. */
 export const readHarnesses = () => fetchHarnesses(false, false);
 
-async function fetchHarnesses(refresh: boolean, retryRejected: boolean) {
+async function fetchHarnesses(refresh: boolean, retryRejected: boolean, harness?: api.HarnessId) {
   const options = getHarnessesQuery();
   await queryClient.cancelQueries(options);
-  const data = await api.getHarnesses(refresh, retryRejected);
+  const data = await api.getHarnesses(refresh, retryRejected, undefined, harness);
   if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, data);
   return data;
 }
@@ -200,4 +220,13 @@ export const getLocalModelsQuery = () => queryOptions({
   queryKey: workspaceKey("getLocalModels"),
   queryFn: ({ signal }) => api.getLocalModels(signal),
   staleTime: 30_000,
+});
+
+export const reportLocaleQuery = (locale: string) => queryOptions({
+  queryKey: workspaceKey("reportLocale", locale),
+  queryFn: ({ signal }) => api.reportLocale(locale, signal),
+  staleTime: 0,
+  retry: 3,
+  retryDelay: 1_000,
+  refetchOnWindowFocus: false,
 });

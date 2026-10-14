@@ -88,6 +88,10 @@ export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceS
   if (path === "/api/latex-templates") { invalidate(["listLatexTemplates"], scope); return; }
   if (path === "/api/overleaf/token") { invalidate(["getOverleafSettings", "getOverleafState", "getOverleafStatus"], scope); return; }
   if (path.startsWith("/api/update/")) { invalidate(["getUpdateStatus", "getLocalMachine"], scope); return; }
+  if (path.startsWith("/api/tunnel/")) {
+    if (path !== "/api/tunnel/pairing-codes") invalidate(["getTunnelAccess", "listTunnelDevices"], scope);
+    return;
+  }
   if (path.startsWith("/api/remote/") || path.startsWith("/_orx/")) {
     invalidate(["listRemoteSessions"], scope);
     void queryClient.invalidateQueries({ queryKey: ["gateway", "runtime"] });

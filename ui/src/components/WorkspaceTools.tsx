@@ -21,12 +21,14 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   rightOffset?: number;
   activeView: "files" | "artifacts" | "experiments" | "terminal" | null;
   projectId: string;
-  onCompute: () => void;
+  /** The entry points below are absent where this connection can't use them
+   * (see `capabilities`). */
+  onCompute?: () => void;
   sessionId: string | null;
   busy: boolean;
-  onChanges: () => void;
-  onFiles: () => void;
-  onTerminal: () => void;
+  onChanges?: () => void;
+  onFiles?: () => void;
+  onTerminal?: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
   /** Absent until there is a chat to branch from. */
@@ -35,14 +37,15 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   const experimentRows = activeWorkspaceRuns(experiments, runs, sessionId);
   const moreTrigger = useRef<HTMLButtonElement>(null);
   const more = usePopover(moreTrigger);
-  const compute = useQuery({ ...getComputeSettingsQuery(projectId), enabled: expanded });
+  const compute = useQuery({ ...getComputeSettingsQuery(projectId), enabled: expanded && onCompute !== undefined });
   const defaultBackend = compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
   const computeLabel = defaultBackend ? TARGET_LABELS[defaultBackend]() : compute.isPending ? "…" : compute.isError ? m.model_picker_unavailable() : m.settings_not_set();
   const items = [
-    { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles },
+    ...(onFiles ? [{ id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles }] : []),
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments },
   ];
+  const hasWorktreeTools = onFiles || onTerminal || onSideChat || (sessionId && onChanges) || experimentRows.length > 0;
   return (
     <div className={`workspace-tools absolute end-3.5 top-7 z-30 ${rightOffset === undefined ? "win-titlebar:top-10" : ""}`} style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
@@ -52,15 +55,17 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
               <Icon size={15} />
             </IconButton>
           ))}
-          <div className="relative">
+          {(onTerminal || onSideChat) && <div className="relative">
             <IconButton ref={moreTrigger} active={activeView === "terminal" || more.open} className="text-text [&.active]:text-text" data-tip={more.open ? undefined : m.workspace_more_tools()} data-tip-align="end" aria-label={m.workspace_more_tools()} aria-expanded={more.open} aria-haspopup="menu" onClick={() => more.setOpen((open) => !open)}>
               <MoreHorizontal size={15} />
             </IconButton>
             {more.open && (
               <div ref={more.ref} role="menu" className="absolute end-0 top-[calc(100%_+_4px)] z-50 flex min-w-40 flex-col rounded-lg border border-border bg-background p-1.5 shadow-menu">
-                <MenuItem role="menuitem" onClick={() => { more.setOpen(false); onTerminal(); }}>
-                  <span className="flex items-center gap-2.5"><Terminal size={15} />{m.workspace_terminal()}</span>
-                </MenuItem>
+                {onTerminal && (
+                  <MenuItem role="menuitem" onClick={() => { more.setOpen(false); onTerminal(); }}>
+                    <span className="flex items-center gap-2.5"><Terminal size={15} />{m.workspace_terminal()}</span>
+                  </MenuItem>
+                )}
                 {onSideChat && (
                   <MenuItem role="menuitem" onClick={() => { more.setOpen(false); onSideChat(); }}>
                     <span className="flex items-center gap-2.5"><MessagesSquare size={15} />{m.side_chat_open()}</span>
@@ -68,7 +73,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                 )}
               </div>
             )}
-          </div>
+          </div>}
         </nav>
       ) : (
         <nav aria-label={m.workspace_tools_heading()} className="workspace-tools-card flex w-60 flex-col gap-0.5 rounded-xl border border-border bg-background px-1.5 py-2 shadow-elevated">
@@ -80,7 +85,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
               <span className="flex items-center gap-4"><Icon size={15} />{itemLabel}</span>
             </MenuItem>
           ))}
-          <MenuItem className="py-1" onClick={onCompute}>
+          {onCompute && <MenuItem className="py-1" onClick={onCompute}>
             <span className="flex min-w-0 flex-col gap-0.5">
               <span className="flex items-center gap-4 text-sm text-text"><Cpu size={15} className="shrink-0" />{m.workspace_default_compute()}</span>
               <span className="flex items-center gap-1.5 ps-[31px] text-menu text-subtext">
@@ -88,21 +93,25 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                 <span className="wrap-anywhere">{computeLabel}</span>
               </span>
             </span>
-          </MenuItem>
-          <div className="mt-2 border-t border-border/50 pt-3">
+          </MenuItem>}
+          {hasWorktreeTools && <div className="mt-2 border-t border-border/50 pt-3">
             <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_this_worktree()}</h2>
-            <MenuItem className="min-h-7 py-1" onClick={onFiles}>
-              <span className="flex items-center gap-4"><FolderOpen size={15} />{m.app_files()}</span>
-            </MenuItem>
-            <MenuItem className="min-h-7 py-1" onClick={onTerminal}>
-              <span className="flex items-center gap-4"><Terminal size={15} />{m.workspace_terminal()}</span>
-            </MenuItem>
+            {onFiles && (
+              <MenuItem className="min-h-7 py-1" onClick={onFiles}>
+                <span className="flex items-center gap-4"><FolderOpen size={15} />{m.app_files()}</span>
+              </MenuItem>
+            )}
+            {onTerminal && (
+              <MenuItem className="min-h-7 py-1" onClick={onTerminal}>
+                <span className="flex items-center gap-4"><Terminal size={15} />{m.workspace_terminal()}</span>
+              </MenuItem>
+            )}
             {onSideChat && (
               <MenuItem className="min-h-7 py-1" onClick={onSideChat}>
                 <span className="flex items-center gap-4"><MessagesSquare size={15} />{m.side_chat_open()}</span>
               </MenuItem>
             )}
-            {sessionId && <ChatBranch key={sessionId} sessionId={sessionId} busy={busy} onChanges={onChanges} />}
+            {sessionId && onChanges && <ChatBranch key={sessionId} sessionId={sessionId} busy={busy} onChanges={onChanges} />}
             {experimentRows.length > 0 && (
               <div>
                 <h2 className="m-0 flex items-center gap-4 px-2 py-1 text-sm font-normal text-text">
@@ -116,7 +125,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                 ))}
               </div>
             )}
-          </div>
+          </div>}
         </nav>
       )}
     </div>

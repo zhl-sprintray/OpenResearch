@@ -36,7 +36,8 @@ export function PlanStrip({
   /** The harness's display name for the strip copy (e.g. "Claude Code",
    * "Codex"); falls back to a generic label when the harness is unknown. */
   agentLabel: string;
-  onView: (intent: TabOpenIntent) => void;
+  /** Opens the full plan; omitted where the plan is already on screen. */
+  onView?: (intent: TabOpenIntent) => void;
   onApprove: (resumeMode?: "auto" | "bypassPermissions") => void;
   /** Claude approval chooses its next permission mode; Codex preserves the
    * current permission choice and only leaves the independent Plan axis. */
@@ -78,7 +79,7 @@ export function PlanStrip({
   };
 
   return (
-    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-s-[3px] border-s-accent-blue rounded-md bg-surface shadow-plan">
+    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-s-[3px] border-s-accent-blue rounded-md bg-accent-blue-subtle shadow-plan">
       <div className="plan-strip-info flex items-baseline gap-2 min-w-0">
         <ScrollText size={14} className="plan-strip-icon text-accent-blue shrink-0 self-center" />
         <span dir="auto" className="plan-strip-title text-sm font-semibold whitespace-nowrap">
@@ -86,12 +87,14 @@ export function PlanStrip({
             ? m.plan_strip_agent_ready({ agent: ltr(agentLabel) })
             : m.plan_strip_agent_proposed({ agent: ltr(agentLabel) })}
         </span>
-        <button
-          className="plan-strip-open ms-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-sm cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
-          {...tabOpenGestureHandlers<HTMLButtonElement>(onView)}
-        >
-          {m.plan_strip_open_plan()}
-        </button>
+        {onView && (
+          <button
+            className="plan-strip-open ms-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-sm cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
+            {...tabOpenGestureHandlers<HTMLButtonElement>(onView)}
+          >
+            {m.plan_strip_open_plan()}
+          </button>
+        )}
       </div>
       {revising ? (
         <>
@@ -155,7 +158,7 @@ export function PlanStrip({
                 <ChevronDown size={13} />
               </Button>
               {menuOpen && (
-                <div className="plan-strip-menu absolute end-0 bottom-[calc(100%_+_4px)] flex min-w-47.5 flex-col rounded-md border border-border bg-surface p-1 shadow-plan-menu z-6">
+                <div className="plan-strip-menu absolute end-0 bottom-[calc(100%_+_4px)] flex min-w-47.5 flex-col rounded-md border border-border bg-background p-1 shadow-plan-menu z-6">
                   <MenuItem
                     onClick={() => {
                       setMenuOpen(false);

@@ -62,7 +62,8 @@ export function ExperimentOverview({
   project: Project;
   runs: Run[];
   onOpenLogs: (runId: string, intent: TabOpenIntent) => void;
-  onOpenCode: (intent: TabOpenIntent) => void;
+  /** Absent where this connection can't browse code. */
+  onOpenCode?: (intent: TabOpenIntent) => void;
 }) {
   const latestRun = runs[0] ?? null;
   const monitoringError = experimentMonitoringError(runs);
@@ -100,12 +101,12 @@ export function ExperimentOverview({
               {m.experiment_overview_logs()}
             </Button>
           )}
-          <Button
+          {onOpenCode && <Button
             {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
           >
             <FolderTree size={15} />
             {m.experiment_overview_code()}
-          </Button>
+          </Button>}
         </div>
 
         {experiment.description && (

@@ -26,8 +26,9 @@ export function ExperimentsTable({
   emptyHint?: string;
   onOpen: (experiment: Experiment, intent: TabOpenIntent) => void;
   onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
-  onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
-  onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  /** Absent where this connection can't browse code or archive experiments. */
+  onOpenCode?: (experimentId: string, intent: TabOpenIntent) => void;
+  onArchive?: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
@@ -102,7 +103,7 @@ export function ExperimentsTable({
           return (
             <div
               key={experiment.id}
-              className="experiment-table-group grid grid-cols-[minmax(0,_1fr)_auto] [grid-template-areas:'name_meta'_'actions_actions'] gap-x-8 items-center py-4 px-5 gap-y-[7px] border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-canvas [&:last-child]:border-b-0 [@container((max-width:_560px))]:grid-cols-[minmax(0,_1fr)_auto] [@container((max-width:_560px))]:gap-x-3.5 [@container((max-width:_560px))]:gap-y-[9px] [@container((max-width:_400px))]:grid-cols-[minmax(0,_1fr)] [@container((max-width:_400px))]:[grid-template-areas:'name'_'meta'_'actions']"
+              className="experiment-table-group grid grid-cols-[minmax(0,_1fr)_auto] [grid-template-areas:'name_meta'_'actions_actions'] gap-x-8 items-center py-4 px-5 gap-y-[7px] border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 [@container((max-width:_560px))]:grid-cols-[minmax(0,_1fr)_auto] [@container((max-width:_560px))]:gap-x-3.5 [@container((max-width:_560px))]:gap-y-[9px] [@container((max-width:_400px))]:grid-cols-[minmax(0,_1fr)] [@container((max-width:_400px))]:[grid-template-areas:'name'_'meta'_'actions']"
               role="listitem"
               onClick={() => onOpen(experiment, "preview")}
               onDoubleClick={() => onOpen(experiment, "keepOpen")}
@@ -158,7 +159,7 @@ export function ExperimentsTable({
                   <Terminal size={15} />
                   {m.experiments_table_logs()}
                 </Button>
-                <Button
+                {onOpenCode && <Button
                   size="small"
                   title={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
@@ -167,7 +168,7 @@ export function ExperimentsTable({
                 >
                   <FolderTree size={15} />
                   {m.experiments_table_code()}
-                </Button>
+                </Button>}
                 {liveRun && (
                   <Button
                     size="small"
@@ -180,12 +181,12 @@ export function ExperimentsTable({
                     {cancelling ? m.common_stopping() : m.common_stop()}
                   </Button>
                 )}
-                <ArchiveMenu
+                {onArchive && <ArchiveMenu
                   id={experiment.id}
                   name={experiment.title || experiment.slug}
                   actions={archiveActions.get(experiment.id)!}
                   onArchive={onArchive}
-                />
+                />}
               </div>
             </div>
           );

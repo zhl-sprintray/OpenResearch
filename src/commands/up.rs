@@ -23,8 +23,8 @@ use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::routing::{get, post, MethodRouter};
+use axum::{Extension, Json, Router};
 use base64::Engine as _;
 use futures::Stream;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -49,7 +49,12 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
+mod devices;
 mod harness_setup;
+mod tailscale;
+mod tunnel;
+pub(crate) use tunnel::reject_tunnel_proxy_headers;
+mod tunnel_access;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -109,6 +114,26 @@ pub async fn run(args: UpArgs) -> Result<()> {
     codex.start_reaper();
     let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
     let stopping = Arc::new(AtomicBool::new(false));
+    let tunnel_access = tunnel_access::TunnelAccessControl::new(
+        Arc::new(tailscale::TailscaleServe),
+        crate::config::config_dir(),
+    )
+    .held_by(format!(
+        "{} (dashboard http://127.0.0.1:{actual_port}, process {})",
+        if args.desktop_app {
+            "the OpenResearch desktop app"
+        } else {
+            "orx up"
+        },
+        std::process::id()
+    ));
+    let tunnel_access = if persistent_host {
+        tunnel_access.blocked(tunnel_access::Blocked::Remote)
+    } else if args.tunnel_access == Some(crate::TunnelAccessFlag::Never) {
+        tunnel_access.blocked(tunnel_access::Blocked::DevSlot)
+    } else {
+        tunnel_access
+    };
     let state = AppState {
         agent: agent.clone(),
         chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
@@ -126,6 +151,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        tunnel_access,
+        tunnel_devices: Arc::new(devices::TunnelDevices::new(None)),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -178,6 +205,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
+    tokio::spawn(adopt_orphaned_runs(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
     spawn_claude_auth_monitor(
         state.chat.clone(),
         claude.clone(),
@@ -193,6 +224,17 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }));
 
     let app = router(state.clone(), remote_auth.clone());
+    {
+        let state = state.clone();
+        let override_enabled = match args.tunnel_access {
+            Some(crate::TunnelAccessFlag::On) => Some(true),
+            Some(crate::TunnelAccessFlag::Off | crate::TunnelAccessFlag::Never) => Some(false),
+            None => None,
+        };
+        tokio::spawn(async move {
+            state.tunnel_access.restore(&state, override_enabled).await;
+        });
+    }
     let url = format!("http://127.0.0.1:{actual_port}");
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let control_server = if persistent_host {
@@ -270,6 +312,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if explicit_stop {
         state.chat.interrupt_all().await;
     }
+    state.tunnel_access.shutdown().await;
     state.remote_sessions.shutdown().await;
     agent.shutdown().await;
     codex.shutdown().await;
@@ -401,6 +444,9 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    tunnel_access: tunnel_access::TunnelAccessControl,
+    /// Devices paired for Tunnel access and outstanding pairing codes.
+    tunnel_devices: Arc<devices::TunnelDevices>,
 }
 
 async fn project_publication_lock(
@@ -500,300 +546,346 @@ impl ProjectLifecycle {
     }
 }
 
-fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
-    let app = Router::new()
-        .route("/api/health", get(health))
-        .route("/api/onboarding/complete", post(complete_onboarding))
-        .route("/api/project-path/status", get(project_path_status))
-        .route("/api/project-path/pick", post(pick_project_folder))
-        .route("/api/git/install", post(install_git))
-        .route("/api/projects", get(list_projects).post(create_project))
-        .route(
-            "/api/projects/starter-prompts/prewarm",
-            post(prewarm_starter_prompts),
-        )
-        .route("/api/projects/activity", get(list_project_activity))
-        .route(
-            "/api/projects/{id}",
-            get(get_project)
-                .patch(update_project)
-                .delete(delete_project),
-        )
-        .route("/api/projects/{id}/open", post(open_project))
-        .route("/api/projects/{id}/git", get(project_git_status))
-        .route(
-            "/api/projects/{id}/starter-prompts",
-            get(project_starter_prompts),
-        )
-        .route("/api/projects/{id}/git/init", post(initialize_project_git))
-        .route("/api/projects/{id}/github", post(enable_project_github))
-        .route(
-            "/api/projects/{id}/github/disable",
-            post(disable_project_github),
-        )
-        .route("/api/projects/{id}/github/push", post(push_project_github))
-        .route("/api/github/account", get(github_account))
-        .route(
-            "/api/github/project-repo-preview",
-            get(github_project_repo_preview),
-        )
-        .route("/api/github/repo-access", get(github_repo_access))
-        .route("/api/projects/{id}/experiments", get(list_experiments))
-        .route("/api/projects/{id}/runs", get(list_project_runs))
-        .route("/api/papers/search", get(search_papers_api))
-        .route("/api/papers/resolve", get(resolve_paper_api))
-        .route("/api/compute/backends", get(compute_backends))
-        .route("/api/runs", post(create_run))
-        .route("/api/runs/{id}", get(get_run))
-        .route("/api/instances", get(list_instances))
-        .route("/api/runs/{id}/cancel", post(cancel_run))
-        .route("/api/runs/{id}/log", get(run_log))
-        .route("/api/runs/{id}/logs", get(run_logs))
-        .route("/api/runs/{id}/diff", get(run_diff))
-        .route("/api/experiments/{id}/diff", get(experiment_diff))
-        .route(
-            "/api/experiments/{id}/archive",
-            axum::routing::patch(set_experiment_archive),
-        )
-        .route("/api/experiments/{id}/commits", get(experiment_commits))
-        .route(
-            "/api/experiments/{id}/commits/{sha}/diff",
-            get(experiment_commit_diff),
-        )
-        .route("/api/projects/{id}/working-tree", get(project_working_tree))
-        .route("/api/projects/{id}/code-tree", get(project_code_tree))
-        .route(
-            "/api/projects/{id}/file",
-            get(project_file)
-                .put(write_project_file)
-                .patch(manage_project_file),
-        )
-        .route("/api/projects/{id}/file/raw", get(project_raw_file))
-        .route("/api/projects/{id}/file/open", post(open_project_file))
-        .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
-        .route("/api/projects/{id}/file/latex", post(compile_project_latex))
-        .route("/api/latex/engine", get(latex_engine))
-        .route(
-            "/api/projects/{id}/file/overleaf",
-            get(overleaf_link)
-                .post(link_overleaf)
-                .delete(unlink_overleaf),
-        )
-        .route("/api/projects/{id}/file/overleaf/sync", post(sync_overleaf))
-        .route(
-            "/api/projects/{id}/file/overleaf/status",
-            get(overleaf_status),
-        )
-        .route(
-            "/api/projects/{id}/file/overleaf/upload",
-            get(overleaf_upload),
-        )
-        .route("/api/overleaf/settings", get(overleaf_settings))
-        .route(
-            "/api/overleaf/token",
-            post(set_overleaf_token).delete(delete_overleaf_token),
-        )
-        .route(
-            "/api/overleaf/session",
-            post(set_overleaf_session).delete(delete_overleaf_session),
-        )
-        .route(
-            "/api/overleaf/session/import",
-            post(import_overleaf_session),
-        )
-        .route(
-            "/api/projects/{id}/file/overleaf/live",
-            post(start_overleaf_live).delete(stop_overleaf_live),
-        )
-        .route("/api/files/abs", get(absolute_file))
-        .route("/api/files/abs/raw", get(absolute_raw_file))
-        .route(
-            "/api/settings/ssh/config",
-            get(ssh_config).put(save_ssh_config),
-        )
-        .route(
-            "/api/projects/{id}/files",
-            get(list_artifacts)
-                .patch(manage_artifact_file)
-                .delete(delete_artifact),
-        )
-        .route("/api/projects/{id}/files/file", get(serve_artifact))
-        .route("/api/projects/{id}/terminal", get(project_terminal))
-        .route("/api/events", get(events))
-        .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
-        .route(
-            "/api/settings/tinker",
-            get(tinker_settings).post(set_tinker_key),
-        )
-        .route(
-            "/api/settings/k8s",
-            get(k8s_settings).post(set_k8s_settings),
-        )
-        .route(
-            "/api/settings/modal",
-            get(modal_settings).post(set_modal_token),
-        )
-        .route("/api/settings/env", get(env_settings).post(set_env_var))
-        .route(
-            "/api/settings/env/{key}",
-            axum::routing::delete(delete_env_var),
-        )
-        .route(
-            "/api/settings/data-dir",
-            get(data_dir_settings).post(set_data_dir),
-        )
-        .route("/api/settings/data-dir/validate", post(validate_data_dir))
-        .route("/api/settings/data-dir/move", post(move_data_dir))
-        .route(
-            "/api/settings/git",
-            get(git_settings).post(set_git_settings),
-        )
-        .route(
-            "/api/settings/projects",
-            get(project_defaults).post(set_project_defaults),
-        )
-        .route(
-            "/api/settings/telemetry",
-            get(telemetry_settings).post(set_telemetry_settings),
-        )
-        .route("/api/telemetry/event", post(record_ui_event))
-        .route("/api/telemetry/locale", post(set_dashboard_locale))
-        .route(
-            "/api/settings/profile",
-            get(profile_settings).post(set_profile_settings),
-        )
-        .route("/api/update", get(update_status))
-        .route("/api/update/apply", post(apply_update))
-        .route("/api/update/restart", post(restart_after_update))
-        .route("/api/update/auto", post(set_auto_update))
-        .route("/api/update/install-cli", post(install_cli))
-        .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
-        .route(
-            "/api/projects/{id}/ui-state",
-            get(project_ui_state).post(set_project_ui_state),
-        )
-        .route(
-            "/api/settings/ssh",
-            get(ssh_settings).post(save_ssh_settings),
-        )
-        .route("/api/settings/ssh/default", post(save_ssh_default))
-        .route("/api/settings/ssh/master", get(ssh_master_status))
-        .route("/api/settings/ssh/preflight", post(ssh_preflight))
-        .route("/api/settings/ssh/connect", get(ssh_connect))
-        .route(
-            "/api/remote/sessions",
-            get(remote_sessions).post(create_remote_session),
-        )
-        .route("/api/remote/sessions/{id}", get(remote_session))
-        .route(
-            "/api/remote/sessions/{id}/reconnect",
-            post(reconnect_remote_session),
-        )
-        .route(
-            "/api/remote/sessions/{id}/disconnect",
-            post(disconnect_remote_session),
-        )
-        .route("/_orx/runtime", get(local_runtime))
-        .route(
-            "/api/settings/slurm",
-            get(slurm_settings).post(set_slurm_settings),
-        )
-        .route("/api/settings/slurm/preflight", post(slurm_preflight))
-        .route(
-            "/api/settings/ray",
-            get(ray_settings).post(set_ray_settings),
-        )
-        .route("/api/settings/ray/preflight", post(ray_preflight))
-        .route("/api/settings/compute", get(compute_settings))
-        .route("/api/settings/compute/default", post(set_compute_default))
-        .route("/api/settings/local", get(local_machine_settings))
-        .route("/api/settings/openresearch", get(openresearch_settings))
-        .route("/api/settings/openresearch/login", get(openresearch_login))
-        .route("/api/settings/commands/run", get(run_settings_command))
-        .route(
-            "/api/settings/openresearch/ssh-key",
-            get(openresearch_ssh_key),
-        )
-        .route(
-            "/api/settings/lit-sources",
-            get(lit_sources_settings).post(set_lit_sources_settings),
-        )
-        .route("/api/harnesses", get(list_harnesses))
-        .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
-        .route(
-            "/api/harnesses/setup/commands",
-            get(harness_setup::commands),
-        )
-        .route("/api/harnesses/setup", get(harness_setup::connect))
-        .route(
-            "/api/local-models",
-            get(list_local_models).post(connect_local_model),
-        )
-        .route("/api/local-models/discover", post(discover_local_models))
-        .route("/api/local-models/{id}/check", post(check_local_model))
-        .route(
-            "/api/local-models/{id}",
-            axum::routing::delete(remove_local_model),
-        )
-        .route("/api/skills", get(list_skills))
-        .route("/api/skills/{name}", get(get_skill))
-        .route(
-            "/api/user-skills",
-            get(list_user_skills)
-                .post(upload_user_skill)
-                .delete(delete_user_skill),
-        )
-        .route(
-            "/api/latex-templates",
-            get(list_latex_templates)
-                .post(upload_latex_template)
-                .delete(delete_latex_template),
-        )
-        .route(
-            "/api/chat/sessions",
-            get(list_chat_sessions).post(create_chat_session),
-        )
-        .route(
-            "/api/chat/sessions/{id}",
-            axum::routing::delete(delete_chat_session).patch(update_chat_session),
-        )
-        .route("/api/chat/sessions/{id}/messages", get(chat_messages))
-        .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
-        .route("/api/chat/sessions/{id}/message", post(send_chat_message))
-        .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
-        .route(
-            "/api/chat/sessions/{id}/compact",
-            post(compact_chat_session),
-        )
-        .route("/api/chat/native-sessions", get(list_native_chats))
-        .route("/api/chat/native-sessions/import", post(import_native_chat))
-        .route(
-            "/api/chat/sessions/{id}/turns/{turnId}/recover",
-            post(recover_chat_turn),
-        )
-        .route("/api/chat/sessions/{id}/side", post(open_side_chat))
-        .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
-        .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
-        .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
-        .route(
-            "/api/chat/sessions/{id}/queue/{itemId}",
-            axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
-        )
-        .route("/api/chat/sessions/{id}/respond", post(respond_chat))
-        // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
-        // mode). Token-authenticated in the handler; blocks until the surfaced
-        // card is answered.
-        .route("/api/internal/permissions", post(bridge_permission))
-        .route("/api/chat/attachments/{name}", get(chat_attachment))
-        .route("/api/agent/status", get(agent_status))
+/// The dashboard's routes, with every registered path recorded so Tunnel
+/// access can prove each one is classified (see `tunnel::classify`).
+struct RouteTable {
+    router: Router<AppState>,
+    paths: Vec<&'static str>,
+}
+
+impl RouteTable {
+    fn route(mut self, path: &'static str, method_router: MethodRouter<AppState>) -> Self {
+        self.router = self.router.route(path, method_router);
+        self.paths.push(path);
+        self
+    }
+}
+
+fn routes() -> RouteTable {
+    RouteTable {
+        router: Router::new(),
+        paths: Vec::new(),
+    }
+    .route("/api/health", get(health))
+    .route("/api/onboarding/complete", post(complete_onboarding))
+    .route("/api/project-path/status", get(project_path_status))
+    .route("/api/project-path/pick", post(pick_project_folder))
+    .route("/api/git/install", post(install_git))
+    .route("/api/projects", get(list_projects).post(create_project))
+    .route(
+        "/api/projects/starter-prompts/prewarm",
+        post(prewarm_starter_prompts),
+    )
+    .route("/api/projects/activity", get(list_project_activity))
+    .route(
+        "/api/projects/{id}",
+        get(get_project)
+            .patch(update_project)
+            .delete(delete_project),
+    )
+    .route("/api/projects/{id}/open", post(open_project))
+    .route("/api/projects/{id}/git", get(project_git_status))
+    .route(
+        "/api/projects/{id}/starter-prompts",
+        get(project_starter_prompts),
+    )
+    .route("/api/projects/{id}/git/init", post(initialize_project_git))
+    .route("/api/projects/{id}/github", post(enable_project_github))
+    .route(
+        "/api/projects/{id}/github/disable",
+        post(disable_project_github),
+    )
+    .route("/api/projects/{id}/github/push", post(push_project_github))
+    .route("/api/github/account", get(github_account))
+    .route(
+        "/api/github/project-repo-preview",
+        get(github_project_repo_preview),
+    )
+    .route("/api/github/repo-access", get(github_repo_access))
+    .route("/api/projects/{id}/experiments", get(list_experiments))
+    .route("/api/projects/{id}/runs", get(list_project_runs))
+    .route("/api/papers/search", get(search_papers_api))
+    .route("/api/papers/resolve", get(resolve_paper_api))
+    .route("/api/compute/backends", get(compute_backends))
+    .route("/api/runs", post(create_run))
+    .route("/api/runs/{id}", get(get_run))
+    .route("/api/instances", get(list_instances))
+    .route("/api/runs/{id}/cancel", post(cancel_run))
+    .route("/api/runs/{id}/log", get(run_log))
+    .route("/api/runs/{id}/logs", get(run_logs))
+    .route("/api/runs/{id}/diff", get(run_diff))
+    .route("/api/experiments/{id}/diff", get(experiment_diff))
+    .route(
+        "/api/experiments/{id}/archive",
+        axum::routing::patch(set_experiment_archive),
+    )
+    .route("/api/experiments/{id}/commits", get(experiment_commits))
+    .route(
+        "/api/experiments/{id}/commits/{sha}/diff",
+        get(experiment_commit_diff),
+    )
+    .route("/api/projects/{id}/working-tree", get(project_working_tree))
+    .route("/api/projects/{id}/code-tree", get(project_code_tree))
+    .route(
+        "/api/projects/{id}/file",
+        get(project_file)
+            .put(write_project_file)
+            .patch(manage_project_file),
+    )
+    .route("/api/projects/{id}/file/raw", get(project_raw_file))
+    .route("/api/projects/{id}/file/open", post(open_project_file))
+    .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
+    .route("/api/projects/{id}/file/latex", post(compile_project_latex))
+    .route("/api/latex/engine", get(latex_engine))
+    .route(
+        "/api/projects/{id}/file/overleaf",
+        get(overleaf_link)
+            .post(link_overleaf)
+            .delete(unlink_overleaf),
+    )
+    .route("/api/projects/{id}/file/overleaf/sync", post(sync_overleaf))
+    .route(
+        "/api/projects/{id}/file/overleaf/status",
+        get(overleaf_status),
+    )
+    .route(
+        "/api/projects/{id}/file/overleaf/upload",
+        get(overleaf_upload),
+    )
+    .route("/api/overleaf/settings", get(overleaf_settings))
+    .route(
+        "/api/overleaf/token",
+        post(set_overleaf_token).delete(delete_overleaf_token),
+    )
+    .route(
+        "/api/overleaf/session",
+        post(set_overleaf_session).delete(delete_overleaf_session),
+    )
+    .route(
+        "/api/overleaf/session/import",
+        post(import_overleaf_session),
+    )
+    .route(
+        "/api/projects/{id}/file/overleaf/live",
+        post(start_overleaf_live).delete(stop_overleaf_live),
+    )
+    .route("/api/files/abs", get(absolute_file))
+    .route("/api/files/abs/raw", get(absolute_raw_file))
+    .route(
+        "/api/settings/ssh/config",
+        get(ssh_config).put(save_ssh_config),
+    )
+    .route(
+        "/api/projects/{id}/files",
+        get(list_artifacts)
+            .patch(manage_artifact_file)
+            .delete(delete_artifact),
+    )
+    .route("/api/projects/{id}/files/file", get(serve_artifact))
+    .route("/api/projects/{id}/terminal", get(project_terminal))
+    .route("/api/events", get(events))
+    .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
+    .route(
+        "/api/settings/tinker",
+        get(tinker_settings).post(set_tinker_key),
+    )
+    .route(
+        "/api/settings/k8s",
+        get(k8s_settings).post(set_k8s_settings),
+    )
+    .route(
+        "/api/settings/modal",
+        get(modal_settings).post(set_modal_token),
+    )
+    .route("/api/settings/env", get(env_settings).post(set_env_var))
+    .route(
+        "/api/settings/env/{key}",
+        axum::routing::delete(delete_env_var),
+    )
+    .route(
+        "/api/settings/data-dir",
+        get(data_dir_settings).post(set_data_dir),
+    )
+    .route("/api/settings/data-dir/validate", post(validate_data_dir))
+    .route("/api/settings/data-dir/move", post(move_data_dir))
+    .route(
+        "/api/settings/git",
+        get(git_settings).post(set_git_settings),
+    )
+    .route(
+        "/api/settings/projects",
+        get(project_defaults).post(set_project_defaults),
+    )
+    .route(
+        "/api/settings/telemetry",
+        get(telemetry_settings).post(set_telemetry_settings),
+    )
+    .route("/api/telemetry/event", post(record_ui_event))
+    .route("/api/telemetry/locale", post(set_dashboard_locale))
+    .route(
+        "/api/settings/profile",
+        get(profile_settings).post(set_profile_settings),
+    )
+    .route("/api/update", get(update_status))
+    .route("/api/update/apply", post(apply_update))
+    .route("/api/update/restart", post(restart_after_update))
+    .route("/api/update/auto", post(set_auto_update))
+    .route("/api/update/install-cli", post(install_cli))
+    .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
+    .route(
+        "/api/projects/{id}/ui-state",
+        get(project_ui_state).post(set_project_ui_state),
+    )
+    .route(
+        "/api/settings/ssh",
+        get(ssh_settings).post(save_ssh_settings),
+    )
+    .route("/api/settings/ssh/default", post(save_ssh_default))
+    .route("/api/settings/ssh/master", get(ssh_master_status))
+    .route("/api/settings/ssh/preflight", post(ssh_preflight))
+    .route("/api/settings/ssh/connect", get(ssh_connect))
+    .route(
+        "/api/remote/sessions",
+        get(remote_sessions).post(create_remote_session),
+    )
+    .route("/api/remote/sessions/{id}", get(remote_session))
+    .route(
+        "/api/remote/sessions/{id}/reconnect",
+        post(reconnect_remote_session),
+    )
+    .route(
+        "/api/remote/sessions/{id}/disconnect",
+        post(disconnect_remote_session),
+    )
+    .route("/_orx/runtime", get(local_runtime))
+    .route(
+        "/api/settings/slurm",
+        get(slurm_settings).post(set_slurm_settings),
+    )
+    .route("/api/settings/slurm/preflight", post(slurm_preflight))
+    .route(
+        "/api/settings/ray",
+        get(ray_settings).post(set_ray_settings),
+    )
+    .route("/api/settings/ray/preflight", post(ray_preflight))
+    .route("/api/settings/compute", get(compute_settings))
+    .route("/api/settings/compute/default", post(set_compute_default))
+    .route("/api/settings/local", get(local_machine_settings))
+    .route("/api/settings/openresearch", get(openresearch_settings))
+    .route("/api/settings/openresearch/login", get(openresearch_login))
+    .route("/api/settings/commands/run", get(run_settings_command))
+    .route(
+        "/api/settings/openresearch/ssh-key",
+        get(openresearch_ssh_key),
+    )
+    .route(
+        "/api/settings/lit-sources",
+        get(lit_sources_settings).post(set_lit_sources_settings),
+    )
+    .route("/api/harnesses", get(list_harnesses))
+    .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
+    .route(
+        "/api/harnesses/setup/commands",
+        get(harness_setup::commands),
+    )
+    .route("/api/harnesses/setup", get(harness_setup::connect))
+    .route(
+        "/api/local-models",
+        get(list_local_models).post(connect_local_model),
+    )
+    .route("/api/local-models/discover", post(discover_local_models))
+    .route("/api/local-models/{id}/check", post(check_local_model))
+    .route(
+        "/api/local-models/{id}",
+        axum::routing::delete(remove_local_model),
+    )
+    .route("/api/skills", get(list_skills))
+    .route("/api/skills/{name}", get(get_skill))
+    .route(
+        "/api/user-skills",
+        get(list_user_skills)
+            .post(upload_user_skill)
+            .delete(delete_user_skill),
+    )
+    .route(
+        "/api/latex-templates",
+        get(list_latex_templates)
+            .post(upload_latex_template)
+            .delete(delete_latex_template),
+    )
+    .route(
+        "/api/chat/sessions",
+        get(list_chat_sessions).post(create_chat_session),
+    )
+    .route(
+        "/api/chat/sessions/{id}",
+        get(get_chat_session)
+            .delete(delete_chat_session)
+            .patch(update_chat_session),
+    )
+    .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+    .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
+    .route("/api/chat/sessions/{id}/message", post(send_chat_message))
+    .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
+    .route(
+        "/api/chat/sessions/{id}/compact",
+        post(compact_chat_session),
+    )
+    .route("/api/chat/native-sessions", get(list_native_chats))
+    .route("/api/chat/native-sessions/import", post(import_native_chat))
+    .route(
+        "/api/chat/sessions/{id}/turns/{turnId}/recover",
+        post(recover_chat_turn),
+    )
+    .route("/api/chat/sessions/{id}/side", post(open_side_chat))
+    .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
+    .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
+    .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
+    .route(
+        "/api/chat/sessions/{id}/queue/{itemId}",
+        axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
+    )
+    .route("/api/chat/sessions/{id}/respond", post(respond_chat))
+    // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
+    // mode). Token-authenticated in the handler; blocks until the surfaced
+    // card is answered.
+    .route("/api/internal/permissions", post(bridge_permission))
+    .route("/api/chat/attachments/{name}", get(chat_attachment))
+    .route("/api/agent/status", get(agent_status))
+    .route(
+        "/api/tunnel/access",
+        get(tunnel_access::get_tunnel_access).put(tunnel_access::set_tunnel_access),
+    )
+    .route(
+        "/api/tunnel/pairing-codes",
+        post(devices::mint_pairing_code),
+    )
+    .route(
+        "/api/tunnel/devices",
+        get(devices::list_devices).delete(devices::revoke_all_devices),
+    )
+    .route(
+        "/api/tunnel/devices/{id}",
+        axum::routing::patch(devices::rename_device).delete(devices::revoke_device),
+    )
+}
+
+/// Routes plus SPA fallback over the shared state, before any listener's guards.
+fn app(state: AppState) -> Router {
+    routes()
+        .router
         .fallback(spa)
         // Chat attachments (PDFs, images) ride as base64 in the send-message
         // JSON body; the 2 MB axum default rejects any real paper. Cap it well
         // above the client-side per-file limit so a full message still fits.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(state);
-    let app = app
+        .with_state(state)
+}
+
+fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
+    let app = app(state)
         .layer(middleware::from_fn(track_active))
+        .layer(middleware::from_fn(tunnel::reject_tunnel_proxy_headers))
         .layer(middleware::from_fn(
             crate::commands::up_remote::loopback_guard,
         ));
@@ -1994,7 +2086,11 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
-            if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
+            if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                &store,
+                &run.id,
+                "Cancel requested because the project is being deleted.",
+            ) {
                 failures.push(format!("{}: {err}", run.id));
             }
         }
@@ -2104,6 +2200,8 @@ struct CreateRunReq {
     telemetry_suppressed: bool,
     experiment_id: String,
     backend: Option<String>,
+    cpus: Option<u32>,
+    mem: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2119,6 +2217,67 @@ struct CreateRunReq {
     force: bool,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
+    /// Absent from dashboard callers; checked against orx up's own config dir.
+    caller_config_dir: Option<std::path::PathBuf>,
+}
+
+impl CreateRunReq {
+    fn from_run_args(args: &crate::ExpRunArgs) -> Result<Self> {
+        Ok(Self {
+            telemetry_suppressed: args.telemetry_suppressed
+                || !crate::telemetry::accounting_reports_enabled(),
+            invocation_context: args
+                .invocation_identity()?
+                .map(|identity| serde_json::to_string(&identity))
+                .transpose()?,
+            experiment_id: args.exp_id.clone(),
+            backend: args.backend.clone(),
+            cpus: args.cpus,
+            mem: args.mem.clone(),
+            flavor: args.flavor.clone(),
+            host: args.host.clone(),
+            container: args.container.clone(),
+            no_container: args.no_container,
+            manifest: args.manifest.clone(),
+            image: args.image.clone(),
+            timeout: args.timeout.clone(),
+            org: args.org.clone(),
+            provider: args.provider.clone(),
+            disk: args.disk,
+            force: args.force,
+            chat_session_id: args.launching_chat_session(),
+            agent_origin: args.agent_origin.clone(),
+            caller_config_dir: Some(absolute_config_dir()),
+        })
+    }
+
+    fn into_run_args(self) -> crate::ExpRunArgs {
+        let mut backend = self.backend;
+        let mut flavor = self.flavor;
+        local::apply_compute_default(&mut backend, &mut flavor);
+        crate::ExpRunArgs {
+            invocation_context: self.invocation_context,
+            telemetry_suppressed: self.telemetry_suppressed,
+            exp_id: self.experiment_id,
+            disk: self.disk,
+            provider: self.provider,
+            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
+            flavor,
+            org: self.org,
+            host: self.host,
+            container: self.container,
+            no_container: self.no_container,
+            manifest: self.manifest,
+            image: self.image,
+            timeout: self.timeout,
+            cpus: self.cpus,
+            mem: self.mem,
+            force: self.force,
+            chat_session_id: self.chat_session_id,
+            agent_origin: self.agent_origin,
+            forwarded: true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2130,6 +2289,7 @@ pub(crate) struct RunLaunchSummary {
     pub run_id: String,
     pub experiment_id: String,
     pub job_id: Option<String>,
+    pub slurm_resources: Option<String>,
 }
 
 async fn decode_local_response<T: serde::de::DeserializeOwned>(
@@ -2185,29 +2345,7 @@ pub(crate) async fn submit_run_via_up(
     port: u16,
     args: &crate::ExpRunArgs,
 ) -> Result<RunLaunchSummary> {
-    let request = CreateRunReq {
-        telemetry_suppressed: args.telemetry_suppressed
-            || !crate::telemetry::accounting_reports_enabled(),
-        invocation_context: args
-            .invocation_identity()?
-            .map(|identity| serde_json::to_string(&identity))
-            .transpose()?,
-        experiment_id: args.exp_id.clone(),
-        backend: args.backend.clone(),
-        flavor: args.flavor.clone(),
-        host: args.host.clone(),
-        container: args.container.clone(),
-        no_container: args.no_container,
-        manifest: args.manifest.clone(),
-        image: args.image.clone(),
-        timeout: args.timeout.clone(),
-        org: args.org.clone(),
-        provider: args.provider.clone(),
-        disk: args.disk,
-        force: args.force,
-        chat_session_id: args.launching_chat_session(),
-        agent_origin: args.agent_origin.clone(),
-    };
+    let request = CreateRunReq::from_run_args(args)?;
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
             .json(&request)
@@ -2222,34 +2360,42 @@ pub(crate) async fn submit_run_via_up(
         .and_then(|backend| backend.get("jobId"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let slurm_resources = response
+        .run
+        .backend
+        .and_then(|backend| serde_json::from_value(backend).ok())
+        .and_then(|backend| local::slurm::requested_resources(&backend));
     Ok(RunLaunchSummary {
         run_id: response.run.id,
         experiment_id: args.exp_id.clone(),
         job_id,
+        slurm_resources,
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct HarnessInstall {
-    pub name: String,
-    pub installed: bool,
-}
-
-/// `orx up`'s install evidence for `harness`, from its own PATH rather than the caller's.
-pub(crate) async fn harness_install_via_up(port: u16, harness: &str) -> Result<HarnessInstall> {
-    let response = authenticate_up_request(local_client()?.get(format!(
-        "http://127.0.0.1:{port}/api/harnesses/{harness}/snapshot"
-    )))
-    .timeout(Duration::from_secs(10))
+pub(crate) async fn chat_request_via_up(
+    port: u16,
+    method: reqwest::Method,
+    path: &str,
+    body: &Value,
+) -> Result<Value> {
+    let response = authenticate_up_request(
+        local_client()?.request(method, format!("http://127.0.0.1:{port}{path}")),
+    )
+    .json(body)
     .send()
     .await
-    .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
-    decode_local_response(response, "check the harness").await
+    .map_err(|error| anyhow!("Could not reach the trusted OpenResearch server: {error}"))?;
+    decode_local_response(response, "submit the chat request").await
 }
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     let response = authenticate_up_request(
-        local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
+        local_client()?
+            .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+            .json(&CancelRunReq {
+                chat_session_id: local::chat::launching_chat_session(),
+            }),
     )
     .send()
     .await
@@ -2258,9 +2404,45 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Launching with orx up's settings after the caller checked its own would
+/// submit to a different cluster or namespace than the one the caller tested.
+/// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
+fn absolute_config_dir() -> std::path::PathBuf {
+    let dir = crate::config::config_dir();
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+fn require_caller_config_dir(
+    caller: Option<&std::path::Path>,
+    own: &std::path::Path,
+) -> Result<()> {
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    let same = caller == own
+        || crate::paths::canonicalize(caller)
+            .ok()
+            .zip(crate::paths::canonicalize(own).ok())
+            .is_some_and(|(a, b)| a == b);
+    if same {
+        return Ok(());
+    }
+    let base = own.parent().unwrap_or(own);
+    Err(anyhow!(
+        "This command uses the compute settings in {}, but orx up launches runs with \
+         the settings in {}. Set XDG_CONFIG_HOME to {} and re-run, or restart orx up \
+         from this environment.",
+        caller.display(),
+        own.display(),
+        base.display()
+    ))
+}
+
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
+        .map_err(bad_request)?;
     let store = Store::open()?;
     let experiment = store
         .get_local_experiment(&req.experiment_id)?
@@ -2269,30 +2451,8 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .project_lifecycle
         .admit(&experiment.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    let mut backend = req.backend;
-    let mut flavor = req.flavor;
-    // Dashboard callers may omit these; forwarded CLI requests arrive resolved.
-    local::apply_compute_default(&mut backend, &mut flavor);
-    let args = crate::ExpRunArgs {
-        invocation_context: req.invocation_context,
-        telemetry_suppressed: req.telemetry_suppressed,
-        exp_id: req.experiment_id,
-        disk: req.disk,
-        provider: req.provider,
-        backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-        flavor,
-        org: req.org,
-        host: req.host,
-        container: req.container,
-        no_container: req.no_container,
-        manifest: req.manifest,
-        image: req.image,
-        timeout: req.timeout,
-        force: req.force,
-        chat_session_id: req.chat_session_id,
-        agent_origin: req.agent_origin,
-        forwarded: true,
-    };
+    // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
+    let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
@@ -2352,7 +2512,18 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+/// Sent by `orx exp cancel`; the dashboard and older CLIs post no body.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelRunReq {
+    chat_session_id: Option<String>,
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Option<Json<CancelRunReq>>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
@@ -2360,8 +2531,12 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
+    let reason = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
+        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    };
     let backend = backend_for_run(&run)?;
-    backend.cancel(&run).await.map_err(bad_request)?;
+    backend.cancel(&run, &reason).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2590,7 +2765,8 @@ struct StarterPromptsQuery {
 /// Four starter prompts for the empty chat, written by a model that has read
 /// the project (paper, README, code). Slow on a cache miss — one headless
 /// model call — so the UI shows a placeholder while it waits. A blank project
-/// is flagged instead so the UI shows its pre-written prompts.
+/// with no profile to tailor to, or whose tailored prompts fail, is flagged so
+/// the UI shows its pre-written prompts.
 async fn project_starter_prompts(
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,
@@ -4420,6 +4596,62 @@ impl axum::body::HttpBody for ActiveBody {
     }
 }
 
+const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// SSH container launches record their handle before the job starts; leave them this long to finish.
+const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
+
+/// Give a supervisor to every submitted local run that has none, so a launch
+/// whose supervisor spawn failed (OR-334) is tracked instead of stuck `starting`.
+async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Runs whose spawn failure is already logged, so a stuck run logs once.
+    let mut reported = HashSet::new();
+    loop {
+        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        let _gate = gate.lock().await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
+            Ok(Ok(failures)) => {
+                for (run_id, err) in failures {
+                    if reported.insert(run_id.clone()) {
+                        eprintln!("orx up: could not recover supervisor for run {run_id}: {err}");
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                eprintln!("orx up: could not check runs for missing supervisors: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Spawns the missing supervisors and returns the runs whose spawn failed.
+fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
+    let store = Store::open()?;
+    let mut failures = Vec::new();
+    for run in store.list_active_runs()? {
+        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
+        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
+            .is_ok_and(|descriptor| descriptor.job_id.is_some());
+        if !submitted
+            || now_ms() - run.updated_at < ORPHANED_RUN_SETTLE_MS
+            || store.get_local_experiment(&run.experiment_id)?.is_none()
+            || crate::commands::supervise::supervisor_running(&run.id)
+        {
+            continue;
+        }
+        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+            failures.push((run.id, err));
+        }
+    }
+    Ok(failures)
+}
+
 /// Relaunch into an update installed underneath this server once that interrupts nothing,
 /// so a long-lived `orx up` stops launching runs and building sandboxes with old code.
 fn spawn_restart_when_idle(state: AppState) {
@@ -5239,6 +5471,7 @@ async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>)
     tokio::task::spawn_blocking(move || {
         crate::telemetry::set_dashboard_locale(&locale)
             .map_err(|e| ApiError::from(anyhow!("could not save the dashboard locale: {e}")))?;
+        crate::telemetry::capture("dashboard_locale", json!({}));
         Ok(Json(json!({ "locale": locale })))
     })
     .await
@@ -6270,7 +6503,7 @@ async fn create_remote_session(
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host)?;
+    require_configured_ssh_host(&host).await?;
     let (created, session) = state
         .remote_sessions
         .create(host, req.ui_preferences, None)
@@ -6309,8 +6542,14 @@ async fn disconnect_remote_session(
     Ok(Json(json!(state.remote_sessions.disconnect(&id).await?)))
 }
 
-async fn local_runtime() -> Json<Value> {
-    Json(json!({ "kind": "local", "version": env!("CARGO_PKG_VERSION") }))
+/// `tunnelAccess` tells the UI to hide what the Tunnel allowlist refuses; the
+/// server enforces it regardless.
+async fn local_runtime(tunnel: Option<Extension<tunnel::TunnelAccess>>) -> Json<Value> {
+    Json(json!({
+        "kind": "local",
+        "version": env!("CARGO_PKG_VERSION"),
+        "tunnelAccess": tunnel.is_some(),
+    }))
 }
 
 async fn list_local_models() -> ApiResult {
@@ -6366,6 +6605,8 @@ const FILL_RETRY_FLOOR: Duration = Duration::from_secs(5);
 struct HarnessQuery {
     refresh: Option<u8>,
     retry: Option<u8>,
+    /// With `refresh=1`, re-detect only this harness instead of every one.
+    harness: Option<String>,
 }
 
 fn overlay_claude_auth(payload: &mut Value, snapshot: &local::claude::AuthSnapshot) {
@@ -6639,11 +6880,24 @@ async fn list_harnesses(
 /// a background fill replaces the entry with the full catalog, then tells the
 /// dashboard to re-read it. `refresh=1` still runs the full probe inline: an
 /// explicit re-check wants the real answer, and the UI shows its own spinner.
+/// With `harness=<id>` it probes only that harness (unless a fill is running)
+/// and serves the cache with it patched in.
 async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
     // `retry` only escalates to a full detect when it actually cleared a
     // runtime rejection — a bare retry is an ordinary cached read.
     let retried = q.retry == Some(1) && state.claude.clear_runtime_rejection();
-    if q.refresh == Some(1) || retried {
+    if let (Some(1), Some(id)) = (q.refresh, q.harness.as_deref()) {
+        // Publishing re-stamps the cache, voiding an in-flight fill's other harnesses;
+        // the fill commits this one itself and the auth monitor re-checks after it.
+        if !state
+            .harness_fill_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let Some(info) = local::harness::detect_harness(id).await {
+                publish_harness(state, &info).await;
+            }
+        }
+    } else if q.refresh == Some(1) || retried {
         // An explicit re-check detects outside the cache lock: a full sweep
         // takes seconds and must not stall every ordinary read queued behind
         // it. Last writer wins — concurrent refreshes may duplicate a sweep.
@@ -6687,8 +6941,8 @@ async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
     seed_harnesses_locked(state, &mut cache).await
 }
 
-/// Commit one harness's full detection after setup changed it, so the
-/// dashboard need not wait on every sibling's probes to see the result.
+/// Commit one harness's full detection after setup or a sign-in changed it, so
+/// the dashboard need not wait on every sibling's probes to see the result.
 async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
     if info.id == "claude-code" {
         if let Some(probe) = info.auth_observation.as_ref() {
@@ -6779,7 +7033,7 @@ async fn seed_harnesses_locked(
 /// live Claude auth observations and first-install telemetry.
 /// The returned `Option` is a claimed auth announcement: the caller emits it
 /// only after committing the payload, so a discarded pass never sends the
-/// dashboard on a `refresh=1` sweep for results nobody will see.
+/// dashboard to re-probe Claude for results nobody will see.
 async fn finish_harnesses_payload(
     state: &AppState,
     harnesses: Vec<local::harness::HarnessInfo>,
@@ -6805,8 +7059,8 @@ async fn finish_harnesses_payload(
         snapshot = state.claude.auth_snapshot();
     }
     // A provisional pass must not announce: `harness.auth` makes the dashboard
-    // call `refreshHarnesses(true)`, an inline full sweep — the stall this
-    // whole design exists to remove — fired by the snapshot's own adoption.
+    // re-probe Claude inline — the stall this whole design exists to remove —
+    // fired by the snapshot's own adoption.
     // A real pass hands its auth snapshot back unclaimed; the caller claims at
     // emit time, after the payload commits, so a pass that loses the cache
     // race never burns a generation it can't announce.
@@ -7106,10 +7360,23 @@ async fn list_chat_sessions(
         (None, Some("all")) => store.list_all_chat_sessions()?,
         (None, _) => return Err(bad_request("projectId or scope=all is required")),
     };
+    // A project's list carries each session's unanswered prompt cards for the
+    // Mobile layout's Pending-prompt indicator; the `/resume` picker skips it.
+    let mut pending = if q.project_id.is_some() {
+        local::chat::pending_prompt_ids(&store, sessions.iter().map(|s| &s.id))?
+    } else {
+        Default::default()
+    };
     let busy = state.chat.busy_sessions().await;
     let sessions: Vec<Value> = sessions
         .iter()
-        .map(|s| local::chat::session_json(s, busy.contains(&s.id)))
+        .map(|s| {
+            let mut value = local::chat::session_json(s, busy.contains(&s.id));
+            if q.project_id.is_some() {
+                value["pendingPromptIds"] = json!(pending.remove(&s.id).unwrap_or_default());
+            }
+            value
+        })
         .collect();
     Ok(Json(json!({ "sessions": sessions })))
 }
@@ -7118,7 +7385,7 @@ async fn list_chat_sessions(
 #[serde(rename_all = "camelCase")]
 struct CreateChatSessionReq {
     project_id: String,
-    harness: String,
+    harness: Option<String>,
     model: Option<String>,
     service_tier: Option<String>,
     permission_mode: Option<String>,
@@ -7128,14 +7395,128 @@ struct CreateChatSessionReq {
     autonomy: Option<Autonomy>,
 }
 
+fn new_chat_settings(
+    project_id: String,
+    preferences: crate::store::StoredUiState,
+    catalog: &Value,
+) -> Result<CreateChatSessionReq> {
+    let harnesses = catalog
+        .get("harnesses")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("OpenResearch could not load New Chat settings."))?;
+    let saved = preferences.preferred_agent;
+    let selected = match saved.as_ref() {
+        Some(saved) => harnesses
+            .iter()
+            .find(|h| h.get("id").and_then(Value::as_str) == Some(&saved.harness)),
+        None => harnesses
+            .iter()
+            .find(|h| h.get("agentReady").and_then(Value::as_bool) == Some(true)),
+    }
+    .ok_or_else(|| {
+        anyhow!("Your New Chat agent is unavailable. Select an available agent in New Chat.")
+    })?;
+    if selected.get("agentReady").and_then(Value::as_bool) != Some(true) {
+        return Err(anyhow!("Your New Chat agent is unavailable. Check its installation and sign-in in OpenResearch."));
+    }
+    let string = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
+    let harness = string(selected.get("id"));
+    let models = selected.get("models").and_then(Value::as_array);
+    let model = saved.as_ref().and_then(|s| s.model.clone()).or_else(|| {
+        if saved.is_none() {
+            string(models.and_then(|m| m.first()).and_then(|m| m.get("id")))
+        } else {
+            None
+        }
+    });
+    let metadata = models.and_then(|models| {
+        models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == model.as_deref())
+    });
+    let options = selected.get("options");
+    let choices = metadata
+        .and_then(|m| m.get("reasoningLevels"))
+        .or_else(|| options.and_then(|o| o.get("reasoningLevels")))
+        .and_then(Value::as_array);
+    let has = |choices: Option<&Vec<Value>>, id: &str| {
+        choices.is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|c| c.get("id").and_then(Value::as_str) == Some(id))
+        })
+    };
+    let model_default = string(metadata.and_then(|m| m.get("defaultReasoningLevel")));
+    let default_reasoning = model_default
+        .filter(|id| has(choices, id))
+        .or_else(|| has(choices, "default").then(|| "default".to_string()))
+        .or_else(|| string(options.and_then(|o| o.get("defaultReasoningLevel"))))
+        .or_else(|| string(choices.and_then(|c| c.first()).and_then(|c| c.get("id"))));
+    let reasoning_level = if choices.is_none_or(Vec::is_empty) {
+        Some("default".to_string())
+    } else {
+        saved
+            .as_ref()
+            .and_then(|s| s.reasoning_level.clone())
+            .filter(|id| has(choices, id))
+            .or(default_reasoning)
+    };
+    let tiers = metadata
+        .and_then(|m| m.get("serviceTiers"))
+        .and_then(Value::as_array);
+    let service_tier = if harness.as_deref() == Some("codex") && tiers.is_some() {
+        Some(
+            saved
+                .as_ref()
+                .and_then(|s| s.service_tier.clone())
+                .filter(|id| id == "default" || has(tiers, id))
+                .unwrap_or_else(|| "default".to_string()),
+        )
+    } else {
+        None
+    };
+    let permission_mode = match saved.as_ref() {
+        Some(saved) => saved.permission_mode.clone(),
+        None => string(options.and_then(|o| o.get("defaultPermissionMode"))),
+    };
+    Ok(CreateChatSessionReq {
+        project_id,
+        harness,
+        model,
+        service_tier,
+        permission_mode,
+        plan_mode: false,
+        reasoning_level,
+        autonomy: Some(preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic)),
+    })
+}
+
+async fn get_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let session = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let busy = state.chat.is_busy(&id).await;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, busy) }),
+    ))
+}
+
 async fn create_chat_session(
     State(state): State<AppState>,
-    Json(req): Json<CreateChatSessionReq>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
+    Json(mut req): Json<CreateChatSessionReq>,
 ) -> ApiResult {
-    reject_if_moving(&state)?;
-    if !local::harness::is_chat_harness(&req.harness) {
-        return Err(bad_request(format!("unknown harness: {}", req.harness)));
+    if let (Some(_), Some(harness)) = (&tunnel_access, req.harness.as_deref()) {
+        if !local::harness::is_chat_harness(harness) {
+            return Err(bad_request(format!("unknown harness: {harness}")));
+        }
+        let requested = req
+            .permission_mode
+            .take()
+            .filter(|mode| !mode.trim().is_empty());
+        req.permission_mode = tunnel::limit_new_session(&state, harness, requested)?;
     }
+    reject_if_moving(&state)?;
     let _admission = state
         .project_lifecycle
         .admit(&req.project_id)
@@ -7144,22 +7525,47 @@ async fn create_chat_session(
     store
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
+    if req.harness.is_none() {
+        let preferences = store.ui_state()?;
+        let catalog = harnesses_payload(
+            &state,
+            &HarnessQuery {
+                refresh: None,
+                retry: None,
+                harness: None,
+            },
+        )
+        .await;
+        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
+    }
+    let harness = req
+        .harness
+        .ok_or_else(|| bad_request("no agent selected"))?;
+    if !local::harness::is_chat_harness(&harness) {
+        return Err(bad_request(format!("unknown harness: {harness}")));
+    }
     let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
     let permission_mode = nonempty(req.permission_mode);
+    // A harness filled in from saved preferences is capped here instead.
+    let permission_mode = if tunnel_access.is_some() {
+        tunnel::limit_new_session(&state, &harness, permission_mode)?
+    } else {
+        permission_mode
+    };
     let service_tier = nonempty(req.service_tier);
     if permission_mode
         .as_deref()
-        .is_some_and(|mode| local::harness::permission_mode_for(&req.harness, mode).is_none())
+        .is_some_and(|mode| local::harness::permission_mode_for(&harness, mode).is_none())
     {
         return Err(bad_request("invalid permission mode for selected harness"));
     }
     if service_tier
         .as_deref()
-        .is_some_and(|tier| local::harness::service_tier_for(&req.harness, tier).is_none())
+        .is_some_and(|tier| local::harness::service_tier_for(&harness, tier).is_none())
     {
         return Err(bad_request("invalid speed for selected harness"));
     }
-    if req.plan_mode && !local::harness::supports_command_plan(&req.harness) {
+    if req.plan_mode && !local::harness::supports_command_plan(&harness) {
         return Err(bad_request(
             "this harness activates Plan through permissions",
         ));
@@ -7167,7 +7573,7 @@ async fn create_chat_session(
     let session = StoredChatSession {
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: req.project_id,
-        harness: req.harness,
+        harness,
         native_session_id: None,
         title: None,
         title_source: None,
@@ -7183,12 +7589,12 @@ async fn create_chat_session(
         goal: None,
         autonomy: req.autonomy.map(|autonomy| autonomy.id().to_string()),
         active_leaf_id: None,
-        parent_session_id: None,
         side_parent_session_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
+    state.chat.emit_session(Some(session.clone())).await;
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))
@@ -7306,9 +7712,25 @@ struct UpdateChatSessionReq {
 
 async fn update_chat_session(
     State(state): State<AppState>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateChatSessionReq>,
 ) -> ApiResult {
+    if tunnel_access.is_some() {
+        // Over Tunnel access a session's modes may only get stricter, and
+        // nothing else about it changes.
+        if req.title.is_some()
+            || req.archived.is_some()
+            || req.goal.is_some()
+            || req.autonomy.is_some()
+        {
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "This action is unavailable over Tunnel access.".into(),
+            ));
+        }
+        tunnel::limit_session_change(&state, &id, req.permission_mode.as_deref(), req.plan_mode)?;
+    }
     reject_if_moving(&state)?;
     let session = if let Some(title) = req.title {
         let title = title.trim();
@@ -7474,9 +7896,13 @@ async fn compact_chat_session(State(state): State<AppState>, Path(id): Path<Stri
 
 async fn send_chat_message(
     State(state): State<AppState>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
     Path(id): Path<String>,
     Json(req): Json<SendChatReq>,
 ) -> ApiResult {
+    if tunnel_access.is_some() {
+        tunnel::limit_session_change(&state, &id, req.permission_mode.as_deref(), req.plan_mode)?;
+    }
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let store = Store::open()?;
@@ -7784,9 +8210,19 @@ fn default_true() -> bool {
 /// Answer an interactive prompt (plan / permission / question) on a session.
 async fn respond_chat(
     State(state): State<AppState>,
+    tunnel_access: Option<Extension<tunnel::TunnelAccess>>,
     Path(id): Path<String>,
-    Json(req): Json<RespondReq>,
+    Json(mut req): Json<RespondReq>,
 ) -> ApiResult {
+    if tunnel_access.is_some() {
+        req.resume_mode = tunnel::limit_resume_mode(
+            &state,
+            &id,
+            &req.prompt_id,
+            req.approve,
+            req.resume_mode.as_deref(),
+        )?;
+    }
     reject_if_stopping(&state)?;
     state
         .chat
@@ -8110,6 +8546,7 @@ fn mime_for(path: &str) -> &'static str {
         Some("css") => "text/css",
         Some("svg") => "image/svg+xml",
         Some("json") | Some("map") => "application/json",
+        Some("webmanifest") => "application/manifest+json",
         Some("png") => "image/png",
         Some("ico") => "image/x-icon",
         Some("woff2") => "font/woff2",
@@ -8118,19 +8555,23 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
-fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
-    // index.html must revalidate every load or browsers heuristically cache it
-    // and keep loading a stale (hashed) bundle; the hashed assets themselves
-    // are immutable by name. favicon.svg is likewise served under a fixed name.
-    let cache = if path == "index.html" || path == "favicon.svg" {
+/// index.html must revalidate every load or browsers heuristically cache it
+/// and keep loading a stale (hashed) bundle; the hashed assets themselves are
+/// immutable by name. favicon.svg and the web app manifest are likewise served
+/// under fixed names.
+fn asset_cache_control(path: &str) -> &'static str {
+    if matches!(path, "index.html" | "favicon.svg" | "manifest.webmanifest") {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
-    };
+    }
+}
+
+fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     (
         [
             (header::CONTENT_TYPE, mime_for(path)),
-            (header::CACHE_CONTROL, cache),
+            (header::CACHE_CONTROL, asset_cache_control(path)),
         ],
         file.data.into_owned(),
     )
@@ -8157,6 +8598,119 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_app_manifest_is_typed_and_revalidated() {
+        assert_eq!(
+            mime_for("manifest.webmanifest"),
+            "application/manifest+json"
+        );
+        assert_eq!(asset_cache_control("manifest.webmanifest"), "no-cache");
+        assert_eq!(asset_cache_control("favicon.svg"), "no-cache");
+        assert_eq!(
+            asset_cache_control("assets/index-abc123.js"),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    /// An `AppState` like `run`'s, without a dashboard lock or background tasks.
+    pub(super) fn test_state() -> AppState {
+        let agent = Arc::new(AgentHost::new(None));
+        let codex = Arc::new(local::codex::CodexHost::new());
+        let claude = Arc::new(local::claude::ClaudeHost::new());
+        AppState {
+            agent: agent.clone(),
+            chat: Arc::new(ChatHost::new(agent, codex, claude.clone())),
+            claude,
+            harnesses: Arc::new(tokio::sync::Mutex::new(None)),
+            project_lifecycle: Arc::new(ProjectLifecycle::default()),
+            project_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            harness_fill_in_flight: Arc::new(AtomicBool::new(false)),
+            claude_catalog_queue: Arc::new(std::sync::Mutex::new(ClaudeCatalogQueue::default())),
+            data_dir_move_in_progress: Arc::new(AtomicBool::new(false)),
+            data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
+            remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
+            remote_instance_id: None,
+            stopping: Arc::new(AtomicBool::new(false)),
+            dashboard_lock: Arc::new(std::sync::Mutex::new(None)),
+            restart: Arc::new(tokio::sync::Notify::new()),
+            tunnel_access: tunnel_access::TunnelAccessControl::new(
+                Arc::new(tailscale::TailscaleServe),
+                std::env::temp_dir().join(format!("orx-test-config-{}", uuid::Uuid::new_v4())),
+            ),
+            tunnel_devices: Arc::new(devices::TunnelDevices::new(Some(
+                std::env::temp_dir().join(format!("orx-tunnel-devices-{}", uuid::Uuid::new_v4())),
+            ))),
+        }
+    }
+
+    #[test]
+    fn new_chat_uses_saved_preferences_and_normalizes_model_settings() {
+        let preferences = crate::store::StoredUiState {
+            onboarding_completed: true,
+            tour_completed: true,
+            workspace: None,
+            preferred_autonomy: Some(Autonomy::Copilot),
+            preferred_agent: Some(StoredAgentSelection {
+                harness: "codex".into(),
+                model: Some("custom-model".into()),
+                reasoning_level: Some("ultra".into()),
+                permission_mode: Some("full-access".into()),
+                service_tier: Some("priority".into()),
+            }),
+        };
+        let catalog = json!({"harnesses": [{
+            "id": "codex", "agentReady": true,
+            "models": [], "options": {"reasoningLevels": [{"id": "default"}, {"id": "high"}]}
+        }]});
+        let req = new_chat_settings("project".into(), preferences, &catalog).unwrap();
+        assert_eq!(req.harness.as_deref(), Some("codex"));
+        assert_eq!(req.model.as_deref(), Some("custom-model"));
+        assert_eq!(req.reasoning_level.as_deref(), Some("default"));
+        assert!(req.service_tier.is_none());
+        assert_eq!(req.permission_mode.as_deref(), Some("full-access"));
+        assert_eq!(req.autonomy, Some(Autonomy::Copilot));
+        assert!(!req.plan_mode);
+    }
+
+    #[test]
+    fn new_chat_falls_back_only_when_no_preference_exists() {
+        let mut preferences = crate::store::StoredUiState {
+            onboarding_completed: false,
+            tour_completed: false,
+            workspace: None,
+            preferred_autonomy: None,
+            preferred_agent: None,
+        };
+        let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,
+            "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
+        let req = new_chat_settings("project".into(), preferences.clone(), &catalog).unwrap();
+        assert_eq!(req.harness.as_deref(), Some("claude-code"));
+        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(req.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(req.autonomy, Some(Autonomy::Agentic));
+        preferences.preferred_agent = Some(StoredAgentSelection {
+            harness: "claude-code".into(),
+            model: Some("custom-claude-model".into()),
+            service_tier: None,
+            permission_mode: Some("plan".into()),
+            reasoning_level: Some("default".into()),
+        });
+        let req = new_chat_settings("project".into(), preferences.clone(), &catalog).unwrap();
+        assert_eq!(req.harness.as_deref(), Some("claude-code"));
+        assert_eq!(req.model.as_deref(), Some("custom-claude-model"));
+        let unavailable = json!({"harnesses": [{"id":"claude-code", "agentReady":false}, {"id":"codex", "agentReady":true}]});
+        assert!(new_chat_settings("project".into(), preferences.clone(), &unavailable).is_err());
+        preferences.preferred_agent = Some(StoredAgentSelection {
+            harness: "codex".into(),
+            model: Some("gpt-6-sol".into()),
+            service_tier: None,
+            permission_mode: None,
+            reasoning_level: None,
+        });
+        assert!(new_chat_settings("project".into(), preferences, &catalog).is_err());
+    }
 
     #[tokio::test]
     async fn empty_local_error_reports_the_http_status() {
@@ -8678,6 +9232,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: true,
+            cancel_reason: None,
             chat_session_id: None,
         };
 
@@ -8700,35 +9255,66 @@ mod tests {
     }
 
     #[test]
-    fn create_run_request_round_trips_agent_attribution_and_force() {
-        let request = CreateRunReq {
+    fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
+        let args = crate::ExpRunArgs {
             invocation_context: None,
             telemetry_suppressed: true,
-            experiment_id: "experiment-1".into(),
-            backend: Some("local".into()),
+            forwarded: false,
+            exp_id: "experiment-1".into(),
+            disk: None,
+            provider: None,
+            backend: Some("slurm".into()),
             flavor: None,
+            org: None,
             host: None,
             container: None,
             no_container: false,
             manifest: None,
             image: None,
             timeout: None,
-            org: None,
-            provider: None,
-            disk: None,
+            cpus: Some(8),
+            mem: Some("64G".into()),
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
         };
+        let request = CreateRunReq::from_run_args(&args).unwrap();
 
         let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["callerConfigDir"], json!(absolute_config_dir()));
         assert_eq!(value["experimentId"], "experiment-1");
+        assert_eq!(value["cpus"], 8);
+        assert_eq!(value["mem"], "64G");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
-        assert_eq!(
-            serde_json::from_value::<CreateRunReq>(value).unwrap(),
-            request
-        );
+        let forwarded = serde_json::from_value::<CreateRunReq>(value)
+            .unwrap()
+            .into_run_args();
+        assert_eq!(forwarded.cpus, Some(8));
+        assert_eq!(forwarded.mem.as_deref(), Some("64G"));
+        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
+        assert!(forwarded.force);
+    }
+
+    #[test]
+    fn require_caller_config_dir_rejects_a_different_dir() {
+        let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
+        let own = root.join("up/openresearch");
+        let caller = root.join("agent/openresearch");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&caller).unwrap();
+
+        assert!(require_caller_config_dir(None, &own).is_ok());
+        assert!(require_caller_config_dir(Some(&own), &own).is_ok());
+        let fresh = root.join("fresh/openresearch");
+        assert!(require_caller_config_dir(Some(&fresh), &fresh).is_ok());
+        assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
+        let error = require_caller_config_dir(Some(&caller), &own)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&caller.display().to_string()));
+        assert!(error.contains(&own.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

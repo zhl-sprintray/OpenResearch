@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import * as routing from "@tanstack/react-router";
 import * as react from "react";
+import { renderToString } from "react-dom/server";
 import * as jsx from "react/jsx-runtime";
 import ts from "typescript";
 import * as workspace from "../src/workspaceState.ts";
@@ -31,8 +32,10 @@ function loadModule(filename, api = {}, remembered = null) {
       if (id.endsWith("/workspacePersistence")) return { getRememberedGlobalWorkspace: () => remembered };
       if (id === "./api") return { isDemoProjectId: () => false, ...api };
       if (id === "./workspaceTabs") return load(new URL("./workspaceTabs.ts", url));
-      if (id === "../App") return { default: () => null };
-      if (id === "../RemoteRuntime") return { RuntimeRoot: () => null, useRuntime: () => ({ kind: "local" }) };
+      if (id === "../App") return { default: () => react.createElement("main", { "data-shell": "desktop" }) };
+      if (id === "../MobileShell") return { MobileShell: ({ view }) => react.createElement("main", { "data-shell": "mobile", "data-view": view.kind }) };
+      if (id === "../useMobileLayout" || id === "../mobileNav" || id === "./mobileNav") return load(new URL(`${id}.ts`, url));
+      if (id === "../RemoteRuntime") return { RuntimeRoot: () => react.createElement(routing.Outlet), useRuntime: () => ({ kind: "local" }) };
       if (id === "../routePages") return { ResumeGlobal: () => null, ResumeProject: () => null, ProjectsPage: () => null };
       if (id.startsWith("./routes/")) return load(new URL(`${id}.tsx`, url));
       throw new Error(`Unexpected dependency: ${id}`);
@@ -122,6 +125,29 @@ test("project resume uses API order, keeps remembered pane, and falls back to ne
   assert.equal(await empty.projectResumeLocation("p"), "/projects/p/tasks/new");
 });
 
+test("mobile resume drops desktop-only panes and pages from persisted state and lands on the chat", async () => {
+  const files = { kind: "home", view: "files" };
+  const experiments = { kind: "home", view: "experiments" };
+  const sessions = [{ id: "latest", projectId: "p", archived: false }, { id: "old", projectId: "p", archived: false }];
+  for (const [location, expected] of [
+    [workspace.taskLocation("p", "old", files), "/projects/p/tasks/old"],
+    [workspace.taskLocation("p", "old", { kind: "code", experimentId: "e", branch: "main", view: "changes" }), "/projects/p/tasks/old"],
+    [workspace.taskLocation("p", "old", experiments), workspace.taskLocation("p", "old", experiments)],
+    ["/projects/p/settings/tunnel", "/projects/p/tasks/latest"],
+    ["/projects/p/skills", "/projects/p/tasks/latest"],
+  ]) {
+    const api = resumeApi(location, sessions, undefined, { latest: { active: files } });
+    const { globalResumeLocation, projectResumeLocation } = loadModule("routeResume.ts", api);
+    assert.equal(await globalResumeLocation(undefined, { mobile: true }), expected, `global ${location}`);
+    assert.equal(await projectResumeLocation("p", undefined, { mobile: true }), expected, `project ${location}`);
+    // The desktop keeps resuming exactly where it was.
+    assert.equal(await globalResumeLocation(), location, `desktop ${location}`);
+  }
+  const remembered = loadModule("routeResume.ts", resumeApi(null, sessions, undefined, { latest: { active: files } }));
+  assert.equal(await remembered.projectResumeLocation("p", undefined, { mobile: true }), "/projects/p/tasks/latest");
+  assert.equal(await remembered.projectResumeLocation("p"), workspace.taskLocation("p", "latest", files));
+});
+
 test("resume uses the current database response and current queued preference; failed reads never become defaults", async () => {
   const saved = "/projects/p/settings/git";
   const api = resumeApi(saved);
@@ -172,7 +198,7 @@ for (const projectId of [undefined, "p"]) {
         return new Promise(() => {});
       };
       const locations = loadModule("routeResume.ts", api);
-      const setup = resumeEffect({ ...locations, client, projectId, isCancelledError: query.isCancelledError,
+      const setup = resumeEffect({ ...locations, client, projectId, mobile: false, isCancelledError: query.isCancelledError,
         setError: value => { error = value; }, setAttempt: update => { attempt = update(attempt); },
         navigate: ({ href }) => { navigated = href; },
       });
@@ -202,7 +228,7 @@ for (const projectId of [undefined, "p"]) {
 test("resume still exposes real failures instead of automatically retrying them", async () => {
   const failure = new Error("HTTP 503");
   let error, attempts = 0;
-  const setup = resumeEffect({ projectId: "p", client: {},
+  const setup = resumeEffect({ projectId: "p", client: {}, mobile: false,
     projectResumeLocation: async () => { throw failure; }, globalResumeLocation: async () => "/projects",
     isCancelledError: query.isCancelledError, navigate: () => assert.fail("must not navigate"),
     setError: value => { error = value; }, setAttempt: () => { attempts++; },
@@ -212,4 +238,46 @@ test("resume still exposes real failures instead of automatically retrying them"
   assert.equal(error, failure);
   assert.equal(attempts, 0);
   cleanup();
+});
+
+// A browser viewport `width` px wide, evaluating min/max-width media queries.
+function viewport(width) {
+  const matches = (query) => [...query.matchAll(/\((min|max)-width:\s*([\d.]+)px\)/g)]
+    .every(([, bound, px]) => bound === "min" ? width >= Number(px) : width <= Number(px));
+  return { innerWidth: width, matchMedia: (query) => ({ matches: matches(query), media: query, addEventListener() {}, removeEventListener() {} }) };
+}
+
+async function renderProject(path, width) {
+  const router = await match(path);
+  globalThis.window = viewport(width);
+  try { return renderToString(react.createElement(routing.RouterProvider, { router })); }
+  finally { delete globalThis.window; }
+}
+
+test("project route picks the Mobile layout below 768px and the desktop shell from 768px", async () => {
+  for (const [width, shell] of [[390, "mobile"], [767, "mobile"], [768, "desktop"], [1440, "desktop"]]) {
+    const html = await renderProject("/projects/p/tasks/task", width);
+    assert.match(html, new RegExp(`data-shell="${shell}"`), `${width}px`);
+    assert.doesNotMatch(html, new RegExp(`data-shell="${shell === "mobile" ? "desktop" : "mobile"}"`), `${width}px`);
+  }
+});
+
+test("Mobile layout shows desktop-only panes as a placeholder and mobile panes as panels", async () => {
+  const at = (pane) => `/projects/p/tasks/task?${new URLSearchParams({ pane: JSON.stringify(pane) })}`;
+  for (const [path, view] of [
+    ["/projects/p/tasks/task", "chat"],
+    [at({ kind: "home", view: "experiments" }), "panel"],
+    [at({ kind: "home", view: "artifacts" }), "panel"],
+    [at({ kind: "plan", sessionId: "task", promptId: "prompt" }), "panel"],
+    [at({ kind: "home", view: "files" }), "desktopOnly"],
+    [at({ kind: "home", view: "terminal" }), "desktopOnly"],
+    [at({ kind: "file", path: "notes.md" }), "desktopOnly"],
+    [at({ kind: "code", experimentId: "experiment", branch: "main", view: "changes" }), "desktopOnly"],
+    [at({ kind: "experiment", experimentId: "experiment", view: "terminal" }), "desktopOnly"],
+    ["/projects/p/settings/git", "desktopOnly"],
+    ["/projects/p/skills", "desktopOnly"],
+  ]) {
+    assert.match(await renderProject(path, 390), new RegExp(`data-view="${view}"`), path);
+  }
+  assert.match(await renderProject(at({ kind: "home", view: "files" }), 1024), /data-shell="desktop"/);
 });

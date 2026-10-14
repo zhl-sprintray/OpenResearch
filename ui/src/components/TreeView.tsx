@@ -63,13 +63,13 @@ type ExpNodeData = {
   githubOwner: string;
   githubRepo: string;
   onOpenView: (id: string, view: ExperimentView, intent: TabOpenIntent) => void;
-  onOpenCode: (
+  onOpenCode?: (
     experimentId: string,
     branch: string,
     view: CodeView,
     intent: TabOpenIntent,
   ) => void;
-  onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onArchive?: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
   actions: ArchiveActions;
 };
 type ExpFlowNode = Node<ExpNodeData, "exp">;
@@ -292,7 +292,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
             {m.tree_view_logs()}
           </button>
         )}
-        <button
+        {onOpenCode && <button
           className="node-action"
           title={m.a11y_browse_code_on({ branch: ltr(exp.branchName) })}
           {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
@@ -301,7 +301,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         >
           <FolderTree size={13} />
           {m.tree_view_code()}
-        </button>
+        </button>}
         {/* Icon-only: labeled actions + the link overflow the card's fixed width. */}
         {githubOwner && githubRepo && <a
           className="node-action"
@@ -314,7 +314,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         >
           <GitHubMark size={13} />
         </a>}
-        <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} compact />
+        {onArchive && <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} compact />}
       </div>
       <Handle type="source" position={Position.Bottom} />
       {/* Node and card share one leave handler — React's enter/leave pairing
@@ -329,7 +329,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           onOpenLogs={runs.length > 0
             ? (intent) => onOpenView(exp.id, "terminal", intent)
             : undefined}
-          onOpenCode={(intent) => onOpenCode(exp.id, exp.branchName, "files", intent)}
+          onOpenCode={onOpenCode && ((intent) => onOpenCode(exp.id, exp.branchName, "files", intent))}
           onMouseEnter={hover.keepOpen}
           onMouseLeave={hover.onMouseLeave}
        />
@@ -450,13 +450,13 @@ export function TreeView({
   /** Open an experiment view as a right-pane tab (card shortcut buttons). */
   onOpenView: (id: string, view: ExperimentView, intent: TabOpenIntent) => void;
   /** Browse an experiment branch's code in the project-level Code tab. */
-  onOpenCode: (
+  onOpenCode?: (
     experimentId: string,
     branch: string,
     view: CodeView,
     intent: TabOpenIntent,
   ) => void;
-  onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onArchive?: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
   /** Current task scope: show only this chat session's experiments, eliding the rest.
    * Null = Entire project scope (the whole forest). */
   agentSessionId: string | null;

@@ -9,10 +9,12 @@ import type {
   ChatSession,
   ContextUsage,
   Experiment,
+  HarnessId,
   OverleafLiveStatus,
   Project,
   QueuedMessage,
   Run,
+  TunnelDevice,
   UpdateStatus,
 } from "./api";
 
@@ -85,7 +87,8 @@ function emitProjectActivityEvent() {
 }
 
 export interface HarnessAuthEvent {
-  harness: string;
+  /** `*` after a reconnect: any harness may have changed while events were lost. */
+  harness: HarnessId | "*";
   authState: string;
 }
 
@@ -177,6 +180,18 @@ function emitUpdateStatus(status: UpdateStatus) {
   updateStatusListeners.forEach((fn) => fn(status));
 }
 
+// A device just paired over Tunnel access: the desktop dashboard toasts it so a
+// pairing nobody here started is noticed.
+type TunnelDevicePairedListener = (device: TunnelDevice) => void;
+const tunnelDevicePairedListeners = new Set<TunnelDevicePairedListener>();
+
+export function onTunnelDevicePaired(fn: TunnelDevicePairedListener): () => void {
+  tunnelDevicePairedListeners.add(fn);
+  return () => {
+    tunnelDevicePairedListeners.delete(fn);
+  };
+}
+
 // Connection state for the whole dashboard: the one EventSource is also the only
 // evidence the local server is there. Starts true — it served this page moments ago.
 let connected = true;
@@ -208,6 +223,7 @@ const REOPEN_AFTER_MS = 3_000;
 
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
+  onRunLog?: (event: RunLogEvent) => void;
   onExperiment?: (experiment: Experiment) => void;
   onProject?: (project: Project) => void;
   onReconnect?: () => void;
@@ -306,7 +322,10 @@ export function useOrxEventStream(handlers: OrxEventHandlers) {
       });
       es.addEventListener("run.log", (e) => {
         const d = parse<RunLogEvent>(e as MessageEvent);
-        if (d?.runId) emitRunLog(d);
+        if (d?.runId) {
+          emitRunLog(d);
+          emitEntity.onRunLog(d);
+        }
       });
       es.addEventListener("chat.session", (e) => {
         const d = parse<{ session: ChatSession }>(e as MessageEvent);
@@ -372,6 +391,10 @@ export function useOrxEventStream(handlers: OrxEventHandlers) {
         const d = parse<UpdateStatus>(e as MessageEvent);
         if (d) emitUpdateStatus(d);
       });
+      es.addEventListener("tunnel.device_paired", (e) => {
+        const d = parse<TunnelDevice>(e as MessageEvent);
+        if (d?.id) tunnelDevicePairedListeners.forEach((fn) => fn(d));
+      });
       es.addEventListener("overleaf.live", (e) => {
         const d = parse<{ key: string; status: OverleafLiveStatus }>(e as MessageEvent);
         if (d?.key && d.status) emitOverleaf({ type: "live", key: d.key, status: d.status });
@@ -391,7 +414,7 @@ export function useOrxEventStream(handlers: OrxEventHandlers) {
   }, []);
 }
 
-type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onReconnect">;
+type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onRunLog" | "onReconnect">;
 const entityListeners = new Set<EntityObservers>();
 export function useOrxEvents(handlers: EntityObservers) {
   const ref = useRef(handlers);
@@ -399,6 +422,7 @@ export function useOrxEvents(handlers: EntityObservers) {
   useEffect(() => {
     const listener: EntityObservers = {
       onRun: (run) => ref.current.onRun(run),
+      onRunLog: (event) => ref.current.onRunLog?.(event),
       onReconnect: () => ref.current.onReconnect?.(),
     };
     entityListeners.add(listener);
@@ -407,5 +431,6 @@ export function useOrxEvents(handlers: EntityObservers) {
 }
 export const emitEntity = {
   onRun: (run: Run) => entityListeners.forEach((h) => h.onRun(run)),
+  onRunLog: (event: RunLogEvent) => entityListeners.forEach((h) => h.onRunLog?.(event)),
   onReconnect: () => entityListeners.forEach((h) => h.onReconnect?.()),
 };

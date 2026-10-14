@@ -31,7 +31,7 @@ export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
   [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
 };
 export const DEMO_RUN_EXPERIMENT_PROMPT =
-  "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
+  "Run the proposed learning-rate probe experiment. Summarize its results using the recorded validation metric and comparison described by the experiment. If it produces an interactive HTML loss chart, show it inline using image syntax.";
 
 export class FileChangedError extends Error {
   readonly currentVersion: string | null;
@@ -379,10 +379,6 @@ export const getProjectStarterPrompts = (
     `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), locale })}`,
     signal,
   );
-
-/** Record a visit so the backend can persist project-level UI recency. */
-export const openProject = (projectId: string) =>
-  post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
 
 export const deleteProject = (projectId: string) =>
   writeResponse(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
@@ -1057,8 +1053,10 @@ export interface RemoteSessionInfo {
   canStartNewHost: boolean;
 }
 
+/** `tunnelAccess` is true when this request came over Tunnel access; the UI
+ * hides what the Tunnel allowlist refuses (the server enforces it anyway). */
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
+  | { kind: "local"; version: string; tunnelAccess?: boolean }
   | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
@@ -1127,6 +1125,10 @@ export interface SlurmSettings {
   partition: string | null;
   account: string | null;
   timeLimit: string | null;
+  /** `--cpus-per-task` default; null = the partition decides (often one core). */
+  cpusPerTask: number | null;
+  /** `--mem` default in Slurm syntax ("64G"); null = the partition decides. */
+  mem: string | null;
   /** Login-node candidates, from ~/.ssh/config (same source as SSH). */
   hosts: SshHost[];
 }
@@ -1139,6 +1141,9 @@ export const saveSlurmSettings = (body: {
   partition?: string;
   account?: string;
   timeLimit?: string;
+  /** 0 clears it back to the partition default. */
+  cpusPerTask?: number;
+  mem?: string;
 }) => post<SlurmSettings>("/api/settings/slurm", body);
 
 export interface SlurmPreflight {
@@ -1490,6 +1495,65 @@ export const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/a
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
 
+/** Tunnel provider state from `GET /api/tunnel/access`. */
+export type TunnelProviderState =
+  | "not-installed"
+  | "logged-out"
+  | "unavailable"
+  | "conflict"
+  | "ready"
+  | "starting"
+  | "connected"
+  | "disconnected";
+
+export interface TunnelStatus {
+  enabled: boolean;
+  provider: string;
+  state: TunnelProviderState;
+  /** The https origin the tunnel publishes (or would publish once on). */
+  origin: string | null;
+  /** The provider's explanation (English, from the server). */
+  message: string | null;
+  /** Why this dashboard can never turn Tunnel access on. */
+  blocked: "remote" | "dev-slot" | null;
+}
+
+export interface TunnelDevice {
+  id: string;
+  name: string;
+  pairedAt: number;
+  lastSeenAt: number;
+}
+
+export interface TunnelPairingCode {
+  code: string;
+  /** `/pair#<code>`, relative to the tunnel origin. */
+  path: string;
+  expiresAt: number;
+}
+
+/** Tunnel access and device management live on the original port only. */
+export const getTunnelAccess = (signal?: AbortSignal) => get<TunnelStatus>("/api/tunnel/access", signal);
+export const setTunnelAccess = (enabled: boolean) => put<TunnelStatus>("/api/tunnel/access", { enabled });
+export const listTunnelDevices = (signal?: AbortSignal) => get<TunnelDevice[]>("/api/tunnel/devices", signal);
+export const mintTunnelPairingCode = () => post<TunnelPairingCode>("/api/tunnel/pairing-codes");
+export const revokeAllTunnelDevices = () =>
+  writeResponse("/api/tunnel/devices", { method: "DELETE" }).then((r) => json<{ revoked: number }>(r));
+
+async function noContent(response: Response): Promise<void> {
+  if (response.ok) return;
+  await json<unknown>(response);
+}
+
+export const renameTunnelDevice = (id: string, name: string) =>
+  writeResponse(`/api/tunnel/devices/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).then(noContent);
+export const revokeTunnelDevice = (id: string) =>
+  writeResponse(`/api/tunnel/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(noContent);
+
 export type OnboardingStep = "welcome" | "environment" | "profile";
 export type FirstActionSurface = "demo" | "project";
 export type FirstAction =
@@ -1514,10 +1578,13 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
-/** Tells orx which language the dashboard displays, for usage analytics. Fire-and-forget. */
-export const reportLocale = (locale: string): void => {
-  void post<{ locale: string }>("/api/telemetry/locale", { locale }).catch(() => {});
-};
+export const reportLocale = (locale: string, signal?: AbortSignal) =>
+  writeResponse("/api/telemetry/locale", {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ locale }),
+  }).then((r) => json<{ locale: string }>(r));
 
 export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
 
@@ -1543,6 +1610,8 @@ export interface HarnessModel {
   defaultReasoningLevel?: string;
   /** Additional processing tiers this model advertises (Codex Fast mode). */
   serviceTiers?: OptionChoice[];
+  /** Whether the model accepts images; absent when the catalog doesn't say. */
+  imageInput?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -1723,10 +1792,11 @@ export interface HarnessSetupCommands {
 export const getHarnessSetupCommands = (signal?: AbortSignal) =>
   get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
 
-export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
+export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal, harness?: HarnessId) => {
   const params = new URLSearchParams();
   if (refresh) params.set("refresh", "1");
   if (retryRejected) params.set("retry", "1");
+  if (harness) params.set("harness", harness);
   const query = params.size > 0 ? `?${params.toString()}` : "";
   return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
 };
@@ -1924,9 +1994,6 @@ export interface ChatSession {
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
-  /** Session whose agent spawned this one with `orx agent spawn`; null for
-   * sessions the user started themselves. */
-  parentSessionId?: string | null;
   /** Chat this side chat branched from. Side chats share its worktree and
    * stay out of history; closing the tab deletes one. */
   sideParentSessionId?: string | null;
@@ -1935,6 +2002,9 @@ export interface ChatSession {
   busy: boolean;
   activeLeafId: string | null;
   contextUsage?: ContextUsage;
+  /** Unresolved prompt cards (permission, plan, question) awaiting the user,
+   * server-computed on a project's session list; absent on `chat.session` events. */
+  pendingPromptIds?: readonly string[];
 }
 
 export const listChatSessions = (projectId: string, signal?: AbortSignal) =>
@@ -1994,6 +2064,9 @@ export const createChatSession = (
   post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
     (r) => r.session,
   );
+
+export const getChatSession = (sessionId: string) =>
+  get<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`).then((r) => r.session);
 
 export const deleteChatSession = (sessionId: string) =>
   writeResponse(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>

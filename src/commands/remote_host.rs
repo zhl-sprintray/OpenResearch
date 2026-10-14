@@ -175,52 +175,68 @@ impl Drop for DashboardLock {
 impl DashboardLock {
     pub(crate) fn acquire(data_dir: &Path, mode: DashboardLockMode) -> Result<Self> {
         let path = shared_path(data_dir, "lock")?;
+        let conflict = match mode {
+            DashboardLockMode::Shared => {
+                "A persistent OpenResearch host is already using this database."
+            }
+            DashboardLockMode::Exclusive => {
+                "Another OpenResearch dashboard is already using this database."
+            }
+        };
+        Self::hold(path, mode)?.ok_or_else(|| anyhow!(conflict))
+    }
+
+    /// Holds an exclusive lock on `path` itself, or `None` while another
+    /// process (or another holder in this one) has it.
+    pub(crate) fn try_exclusive_at(path: &Path) -> Result<Option<Self>> {
+        Self::hold(path.to_path_buf(), DashboardLockMode::Exclusive)
+    }
+
+    fn hold(path: PathBuf, mode: DashboardLockMode) -> Result<Option<Self>> {
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
-            let result = (|| -> Result<()> {
+            let result = (|| -> Result<bool> {
                 let mut lock = open_lock(&path).map_err(|error| {
                     anyhow!("Could not open dashboard lock {}: {error}", path.display())
                 })?;
-                match mode {
-                    DashboardLockMode::Shared => {
-                        let _guard = lock.try_read().map_err(|error| {
-                            if is_lock_conflict(&error) {
-                                anyhow!(
-                                    "A persistent OpenResearch host is already using this database."
-                                )
-                            } else {
-                                lock_error(&path, error)
-                            }
-                        })?;
-                        ready_tx.send(Ok(())).ok();
+                let held = match mode {
+                    DashboardLockMode::Shared => lock.try_read().map(|guard| {
+                        ready_tx.send(Ok(true)).ok();
                         let _ = release_rx.recv();
-                    }
-                    DashboardLockMode::Exclusive => {
-                        let _guard = lock.try_write().map_err(|error| {
-                            if is_lock_conflict(&error) {
-                                anyhow!(
-                                    "Another OpenResearch dashboard is already using this database."
-                                )
-                            } else {
-                                lock_error(&path, error)
-                            }
-                        })?;
-                        ready_tx.send(Ok(())).ok();
+                        drop(guard);
+                    }),
+                    DashboardLockMode::Exclusive => lock.try_write().map(|guard| {
+                        ready_tx.send(Ok(true)).ok();
                         let _ = release_rx.recv();
-                    }
+                        drop(guard);
+                    }),
+                };
+                match held {
+                    Ok(()) => Ok(true),
+                    Err(error) if is_lock_conflict(&error) => Ok(false),
+                    Err(error) => Err(lock_error(&path, error)),
                 }
-                Ok(())
             })();
-            if let Err(error) = result {
-                let _ = ready_tx.send(Err(error.to_string()));
+            match result {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = ready_tx.send(Ok(false));
+                }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error.to_string()));
+                }
             }
         });
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(true)) => Ok(Some(Self {
                 release: Some(release_tx),
                 thread: Some(thread),
-            }),
+            })),
+            Ok(Ok(false)) => {
+                let _ = thread.join();
+                Ok(None)
+            }
             Ok(Err(error)) => {
                 let _ = thread.join();
                 Err(anyhow!(error))

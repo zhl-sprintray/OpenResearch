@@ -1,7 +1,10 @@
 import { createFileRoute, notFound, Outlet, useRouter, useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
 import App from "../App";
+import { MobileShell } from "../MobileShell";
+import { mobilePaneView, type MobilePaneView } from "../mobileNav";
 import { useRuntime } from "../RemoteRuntime";
+import { useMobileLayout } from "../useMobileLayout";
 import { parseDestination, parsePane, type Pane } from "../workspaceState";
 
 export const Route = createFileRoute("/projects/$projectId")({
@@ -20,7 +23,13 @@ function ProjectLayout() {
     if (search === null) return;
     void router.navigate({ href: `${location.pathname}${search}${location.hash ? `#${location.hash}` : ""}`, replace: true });
   }, [location, router]);
-  return <><Outlet /><App projectId={projectId} pane={pane} runtime={useRuntime()} /></>;
+  const runtime = useRuntime();
+  const mobile = useMobileLayout();
+  if (!mobile) return <><Outlet /><App projectId={projectId} pane={pane} runtime={runtime} /></>;
+  const destination = parseDestination(location.pathname);
+  // Skills and settings have no Mobile layout entry; deep links get the placeholder.
+  const view: MobilePaneView = destination?.kind === "skills" || destination?.kind === "settings" ? { kind: "desktopOnly" } : mobilePaneView(pane);
+  return <><Outlet /><MobileShell projectId={projectId} sessionId={destination?.kind === "task" ? destination.sessionId ?? null : null} pane={pane} view={view} runtime={runtime} /></>;
 }
 
 export function normalizedPaneSearch(searchStr: string): string | null {

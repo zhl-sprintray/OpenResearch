@@ -7,6 +7,7 @@ import test from 'node:test'
 
 import {
   acquireAdvisoryLock,
+  backendUpArgs,
   initializeDatabase,
   managedStateMatches,
   parseArgs,
@@ -15,6 +16,15 @@ import {
   sqliteBackupCommand,
   supervisorCommandMatches,
 } from './dev-slot.mjs'
+
+test('dev slot backends force Tunnel access off', () => {
+  const args = backendUpArgs(5123)
+  assert.deepEqual(args.slice(args.indexOf('--tunnel-access'), args.indexOf('--tunnel-access') + 2), [
+    '--tunnel-access',
+    'never',
+  ])
+  assert.deepEqual(args.slice(-2), ['--port', '5123'])
+})
 
 test('requires an explicit database mode when starting', () => {
   assert.throws(() => parseArgs(['start']), /requires --db empty or --db copy/)

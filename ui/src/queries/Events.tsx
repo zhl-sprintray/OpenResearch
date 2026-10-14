@@ -2,6 +2,7 @@ import type { InfiniteData } from "@tanstack/react-query";
 import type { ChatSession, SidebarChatPage } from "../api";
 import { markLiveUpdate } from "./live";
 import {
+  refreshHarness,
   refreshHarnesses,
   getHarnessesQuery,
   getUpdateStatusQuery,
@@ -21,6 +22,7 @@ import {
 import { queryClient, workspaceScope, isCurrentScope, deletedSessionIds } from "./client";
 import { listProjectsQuery, listRunsQuery, listExperimentsQuery } from "./projects";
 import { listChatSessionsQuery } from "./chat";
+import { applyPromptMessage } from "../mobileNav";
 
 import { artifactFamilies, liveFamilies, invalidateFamilies, removeSession } from "./invalidation";
 
@@ -102,10 +104,27 @@ export function QueryEvents() {
           if (!rows) return undefined;
           const old = rows.find((row) => row.id === event.session.id);
           if (!old) return [event.session, ...rows];
-          return upsert(rows, { ...event.session, contextUsage: event.session.contextUsage ?? old.contextUsage });
+          return upsert(rows, {
+            ...event.session,
+            contextUsage: event.session.contextUsage ?? old.contextUsage,
+            pendingPromptIds: event.session.pendingPromptIds ?? old.pendingPromptIds,
+          });
         });
       } else if (event.type === "sessionDeleted") {
         removeSession(event.sessionId);
+      } else if (event.type === "message") {
+        // Keep the Pending-prompt indicator live without refetching the list.
+        let changed = false;
+        const update = (row: ChatSession) => {
+          if (row.id !== event.sessionId) return row;
+          const current = row.pendingPromptIds ?? [];
+          const ids = applyPromptMessage(current, event.message);
+          if (ids === current) return row;
+          changed = true;
+          return { ...row, pendingPromptIds: ids };
+        };
+        queryClient.setQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] }, (rows) => rows?.map(update));
+        if (changed) markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
       } else if (event.type === "busy" || event.type === "usage") {
         const update = (row: ChatSession) => row.id !== event.sessionId ? row : event.type === "busy" ? { ...row, busy: event.busy } : { ...row, contextUsage: event.usage };
         queryClient.setQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] }, (rows) => rows?.map(update));
@@ -114,7 +133,11 @@ export function QueryEvents() {
         });
       }
     });
-    const offAuth = onHarnessAuth(() => { if (isCurrentScope(scope)) void refreshHarnesses(true).catch(() => {}); });
+    const offAuth = onHarnessAuth(({ harness }) => {
+      if (!isCurrentScope(scope)) return;
+      // Re-probe only the harness whose sign-in changed; a full sweep waits on the slowest CLI.
+      void (harness === "*" ? refreshHarnesses(true) : refreshHarness(harness)).catch(() => {});
+    });
     // The catalog fill already ran server-side; a plain read serves the
     // updated cache — forcing a refresh here would spawn a second sweep. The
     // query's 5-minute staleTime would swallow a bare fetchQuery, so bypass it.

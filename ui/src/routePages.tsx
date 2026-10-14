@@ -4,12 +4,15 @@ import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@t
 import { useEffect, useState } from "react";
 
 import { useRuntime } from "./RemoteRuntime";
+import { capabilities } from "./capabilities";
+import { useMobileLayout } from "./useMobileLayout";
 
 import { clearReadDemoSessions } from "./demoSessionState";
 import { globalResumeLocation, projectResumeLocation } from "./routeResume";
 import { m } from "./paraglide/messages.js";
 import { Onboarding } from "./components/Onboarding";
 import { OfflineBanner } from "./components/OfflineBanner";
+import { TunnelAccessBadge } from "./components/TunnelAccessBadge";
 import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { DesktopAppBanner } from "./components/DesktopAppBanner";
@@ -43,10 +46,12 @@ function Resume({ projectId }: { projectId?: string }) {
   const navigate = useNavigate();
   const [error, setError] = useState<Error | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // Read once per resume: persisted desktop panes must not strand a phone on "Desktop only".
+  const mobile = useMobileLayout();
   useEffect(() => {
     let current = true;
     setError(null);
-    void (projectId ? projectResumeLocation(projectId, client) : globalResumeLocation(client))
+    void (projectId ? projectResumeLocation(projectId, client, { mobile }) : globalResumeLocation(client, { mobile }))
       .then((href) => { if (current) void navigate({ href, replace: true }); })
       .catch((cause: unknown) => {
         if (!current) return;
@@ -55,7 +60,7 @@ function Resume({ projectId }: { projectId?: string }) {
         else setError(cause instanceof Error ? cause : new Error(String(cause)));
       });
     return () => { current = false; };
-  }, [projectId, attempt, navigate, client]);
+  }, [projectId, attempt, navigate, client, mobile]);
   return error ? <RouteFailure error={error} reset={() => setAttempt((value) => value + 1)} /> : <RoutePending />;
 }
 
@@ -73,7 +78,8 @@ export function ProjectsPage() {
   const onboarding = projects?.length === 0;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
-  const { status } = useUpdateStatus(runtime.kind === "local");
+  const caps = capabilities(runtime);
+  const { status } = useUpdateStatus(runtime.kind === "local" && caps.updates);
   useEffect(() => {
     document.title = "OpenResearch";
   }, []);
@@ -81,11 +87,11 @@ export function ProjectsPage() {
 
   return (
     <div className="app flex flex-col h-full">
-      {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /></>}
+      {runtime.kind === "local" && <><OfflineBanner />{caps.updates && <UpdateBanner status={status} />}{caps.tunnelSettings && <TunnelAccessBadge />}</>}
       <DesktopAppBanner />
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />
-          : onboarding ? (
+          : onboarding && caps.projectCreate ? (
             <Onboarding
               remote={runtime.kind === "ssh"}
               preferredAgent={state.preferredAgent}

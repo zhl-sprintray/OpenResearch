@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>OpenResearch</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }
+  main { max-width: 22rem; padding: 1.5rem; text-align: center; }
+  h1 { font-size: 1.25rem; margin: 0 0 .75rem; }
+  p { margin: 0; line-height: 1.5; opacity: .8; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title"></h1>
+  <p id="detail"></p>
+</main>
+<script>
+(function () {
+  var zh = /^zh/i.test(navigator.language || "");
+  var text = zh ? {
+    pairing: "正在配对…",
+    start: "请在电脑上发起配对",
+    startDetail: "在电脑的 OpenResearch 设置中打开 Tunnel access，点击“添加设备”，然后用这台设备扫描二维码。",
+    failed: "配对失败"
+  } : {
+    pairing: "Pairing…",
+    start: "Start pairing on your computer",
+    startDetail: "On your computer, open OpenResearch settings, go to Tunnel access, choose Add device, and scan the QR code with this device.",
+    failed: "Pairing failed"
+  };
+  var title = document.getElementById("title");
+  var detail = document.getElementById("detail");
+  function show(heading, body) { title.textContent = heading; detail.textContent = body; }
+  var code = location.hash.slice(1);
+  if (location.pathname !== "/pair" || !code) { show(text.start, text.startDetail); return; }
+  history.replaceState(null, "", "/pair");
+  show(text.pairing, "");
+  fetch("/api/tunnel/pair", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code: code }),
+    credentials: "same-origin"
+  }).then(function (response) {
+    if (response.ok || response.redirected) { location.replace("/"); return; }
+    return response.json().then(function (body) { show(text.failed, body.error || ""); });
+  }).catch(function (error) { show(text.failed, String(error)); });
+})();
+</script>
+</body>
+</html>
