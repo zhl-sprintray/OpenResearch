@@ -108,10 +108,10 @@ export function UpdateBanner({ status, compact = false }: { status: UpdateStatus
 
   return (
     <div
-      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text bg-surface border-b border-b-border"
+      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text bg-accent-blue-subtle border-b border-b-accent-blue-border"
       role="status"
     >
-      <RefreshCw size={13} className={`shrink-0 text-subtext${restarting ? " animate-spin" : ""}`} />
+      <RefreshCw size={13} className={`shrink-0 text-accent-blue-strong${restarting ? " animate-spin" : ""}`} />
       <span className={compact ? "min-w-0 truncate" : "min-w-0"}>
         {error
           ? m.update_banner_restart_failed({ error })
